@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -17,16 +17,20 @@
  */
 package org.apache.ratis.protocol;
 
+import org.apache.ratis.util.JavaUtils;
+import org.apache.ratis.util.Preconditions;
+
 public abstract class RaftClientMessage implements RaftRpcMessage {
   private final ClientId clientId;
   private final RaftPeerId serverId;
   private final RaftGroupId groupId;
+  private final long callId;
 
-  public RaftClientMessage(ClientId clientId, RaftPeerId serverId,
-      RaftGroupId groupId) {
-    this.clientId = clientId;
-    this.serverId = serverId;
-    this.groupId = groupId;
+  RaftClientMessage(ClientId clientId, RaftPeerId serverId, RaftGroupId groupId, long callId) {
+    this.clientId = Preconditions.assertNotNull(clientId, "clientId");
+    this.serverId = Preconditions.assertNotNull(serverId, "serverId");
+    this.groupId = Preconditions.assertNotNull(groupId, "groupId");
+    this.callId = callId;
   }
 
   @Override
@@ -52,9 +56,13 @@ public abstract class RaftClientMessage implements RaftRpcMessage {
     return groupId;
   }
 
+  public long getCallId() {
+    return callId;
+  }
+
   @Override
   public String toString() {
-    return getClass().getSimpleName() + ":" + clientId + "->" + serverId
-        + (groupId != null? "@" + groupId: "");
+    return JavaUtils.getClassSimpleName(getClass()) + ":" + clientId + "->" + serverId
+        + (groupId != null? "@" + groupId: "") + ", cid=" + getCallId();
   }
 }

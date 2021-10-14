@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,7 +19,7 @@ package org.apache.ratis.server.impl;
 
 import org.apache.ratis.RaftTestUtil;
 import org.apache.ratis.util.CodeInjectionForTesting;
-import org.apache.ratis.util.StringUtils;
+import org.apache.ratis.util.JavaUtils;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +33,7 @@ public class BlockRequestHandlingInjection implements CodeInjectionForTesting.Co
     CodeInjectionForTesting.put(RaftServerImpl.REQUEST_VOTE, INSTANCE);
     CodeInjectionForTesting.put(RaftServerImpl.APPEND_ENTRIES, INSTANCE);
     CodeInjectionForTesting.put(RaftServerImpl.INSTALL_SNAPSHOT, INSTANCE);
+    CodeInjectionForTesting.put(RaftServerImpl.START_LEADER_ELECTION, INSTANCE);
   }
 
   public static BlockRequestHandlingInjection getInstance() {
@@ -78,6 +79,7 @@ public class BlockRequestHandlingInjection implements CodeInjectionForTesting.Co
       RaftTestUtil.block(() -> shouldBlock(localId, remoteId));
     } catch (InterruptedException e) {
       LOG.debug("Interrupted while blocking request from " + remoteId + " to " + localId, e);
+      Thread.currentThread().interrupt();
     }
     LOG.info(localId + ": unBlock request from " + remoteId);
     return true;
@@ -90,7 +92,7 @@ public class BlockRequestHandlingInjection implements CodeInjectionForTesting.Co
 
   @Override
   public String toString() {
-    return getClass().getSimpleName()
+    return JavaUtils.getClassSimpleName(getClass())
         + ": requestors=" + requestors.keySet()
         + ", repliers=" + repliers.keySet();
   }

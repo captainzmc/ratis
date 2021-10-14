@@ -20,8 +20,9 @@ package org.apache.ratis;
 import org.apache.log4j.Level;
 import org.apache.ratis.client.RaftClient;
 import org.apache.ratis.conf.RaftProperties;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerImpl;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.server.simulation.MiniRaftClusterWithSimulatedRpc;
 import org.apache.ratis.proto.RaftProtos;
 import org.apache.ratis.statemachine.SimpleStateMachine4Testing;
@@ -41,7 +42,7 @@ import java.util.concurrent.TimeUnit;
  */
 public class TestRaftServerNoLeaderTimeout extends BaseTest {
   static {
-    Log4jUtils.setLogLevel(RaftServerImpl.LOG, Level.DEBUG);
+    Log4jUtils.setLogLevel(RaftServer.Division.LOG, Level.DEBUG);
     Log4jUtils.setLogLevel(RaftClient.LOG, Level.DEBUG);
   }
 
@@ -77,8 +78,8 @@ public class TestRaftServerNoLeaderTimeout extends BaseTest {
     RaftTestUtil.waitForLeader(cluster);
     final TimeDuration noLeaderTimeout = RaftServerConfigKeys.Notification.noLeaderTimeout(cluster.getProperties());
 
-    RaftServerImpl healthyFollower = cluster.getFollowers().get(1);
-    RaftServerImpl failedFollower = cluster.getFollowers().get(0);
+    final RaftServer.Division healthyFollower = cluster.getFollowers().get(1);
+    final RaftServer.Division failedFollower = cluster.getFollowers().get(0);
     // fail the leader and one of the followers to that quorum is not present
     // for next leader election to succeed.
     cluster.killServer(failedFollower.getId());

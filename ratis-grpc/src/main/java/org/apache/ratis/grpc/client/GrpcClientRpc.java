@@ -24,6 +24,7 @@ import org.apache.ratis.grpc.GrpcConfigKeys;
 import org.apache.ratis.grpc.GrpcTlsConfig;
 import org.apache.ratis.grpc.GrpcUtil;
 import org.apache.ratis.protocol.*;
+import org.apache.ratis.protocol.exceptions.AlreadyClosedException;
 import org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException;
 import org.apache.ratis.thirdparty.io.grpc.stub.StreamObserver;
 import org.apache.ratis.proto.RaftProtos.GroupInfoRequestProto;
@@ -32,6 +33,7 @@ import org.apache.ratis.proto.RaftProtos.GroupManagementRequestProto;
 import org.apache.ratis.proto.RaftProtos.RaftClientReplyProto;
 import org.apache.ratis.proto.RaftProtos.RaftClientRequestProto;
 import org.apache.ratis.proto.RaftProtos.SetConfigurationRequestProto;
+import org.apache.ratis.proto.RaftProtos.TransferLeadershipRequestProto;
 import org.apache.ratis.util.IOUtils;
 import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.PeerProxyMap;
@@ -48,14 +50,13 @@ public class GrpcClientRpc extends RaftClientRpcWithProxy<GrpcClientProtocolClie
 
   private final ClientId clientId;
   private final int maxMessageSize;
-  private final GrpcTlsConfig tlsConfig;
 
-  public GrpcClientRpc(ClientId clientId, RaftProperties properties, GrpcTlsConfig tlsConfig) {
+  public GrpcClientRpc(ClientId clientId, RaftProperties properties,
+      GrpcTlsConfig adminTlsConfig, GrpcTlsConfig clientTlsConfig) {
     super(new PeerProxyMap<>(clientId.toString(),
-        p -> new GrpcClientProtocolClient(clientId, p, properties, tlsConfig)));
+        p -> new GrpcClientProtocolClient(clientId, p, properties, adminTlsConfig, clientTlsConfig)));
     this.clientId = clientId;
     this.maxMessageSize = GrpcConfigKeys.messageSizeMax(properties, LOG::debug).getSizeInt();
-    this.tlsConfig = tlsConfig;
   }
 
   @Override
@@ -66,7 +67,7 @@ public class GrpcClientRpc extends RaftClientRpcWithProxy<GrpcClientProtocolClie
       final GrpcClientProtocolClient proxy = getProxies().getProxy(serverId);
       // Reuse the same grpc stream for all async calls.
       return proxy.getOrderedStreamObservers().onNext(request);
-    } catch (Throwable e) {
+    } catch (Exception e) {
       return JavaUtils.completeExceptionally(e);
     }
   }
@@ -78,9 +79,9 @@ public class GrpcClientRpc extends RaftClientRpcWithProxy<GrpcClientProtocolClie
       final GrpcClientProtocolClient proxy = getProxies().getProxy(serverId);
       // Reuse the same grpc stream for all async calls.
       return proxy.getUnorderedAsyncStreamObservers().onNext(request);
-    } catch (Throwable t) {
-      LOG.error(clientId + ": XXX Failed " + request, t);
-      return JavaUtils.completeExceptionally(t);
+    } catch (Exception e) {
+      LOG.error(clientId + ": XXX Failed " + request, e);
+      return JavaUtils.completeExceptionally(e);
     }
   }
 
@@ -105,12 +106,17 @@ public class GrpcClientRpc extends RaftClientRpcWithProxy<GrpcClientProtocolClie
       final GroupInfoRequestProto proto = ClientProtoUtils.toGroupInfoRequestProto(
           (GroupInfoRequest) request);
       return ClientProtoUtils.toGroupInfoReply(proxy.groupInfo(proto));
+    } else if (request instanceof TransferLeadershipRequest) {
+      final TransferLeadershipRequestProto proto = ClientProtoUtils.toTransferLeadershipRequestProto(
+          (TransferLeadershipRequest) request);
+      return ClientProtoUtils.toRaftClientReply(proxy.transferLeadership(proto));
     } else {
       final CompletableFuture<RaftClientReply> f = sendRequest(request, proxy);
       // TODO: timeout support
       try {
         return f.get();
       } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
         throw new InterruptedIOException(
             "Interrupted while waiting for response of request " + request);
       } catch (ExecutionException e) {

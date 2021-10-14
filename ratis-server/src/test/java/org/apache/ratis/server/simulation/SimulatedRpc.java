@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -23,7 +23,7 @@ import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.protocol.ClientId;
 import org.apache.ratis.rpc.RpcType;
 import org.apache.ratis.server.RaftServer;
-import org.apache.ratis.server.impl.ServerFactory;
+import org.apache.ratis.server.ServerFactory;
 import org.apache.ratis.util.JavaUtils;
 
 import java.util.Objects;
@@ -41,7 +41,7 @@ class SimulatedRpc implements RpcType {
     return new Factory(parameters);
   }
 
-  static class Factory extends ServerFactory.BaseFactory implements ClientFactory {
+  static class Factory implements ServerFactory, ClientFactory {
     static String SERVER_REQUEST_REPLY_KEY = "raft.simulated.serverRequestReply";
     static String CLIENT_TO_SERVER_REQUEST_REPLY_KEY = "raft.simulated.client2serverRequestReply";
 

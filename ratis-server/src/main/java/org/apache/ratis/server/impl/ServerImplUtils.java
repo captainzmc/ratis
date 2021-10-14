@@ -20,14 +20,20 @@ package org.apache.ratis.server.impl;
 import org.apache.ratis.conf.Parameters;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.protocol.RaftGroup;
+import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
+import org.apache.ratis.server.RaftConfiguration;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.protocol.TermIndex;
+import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.statemachine.StateMachine;
 import org.apache.ratis.util.IOUtils;
 import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.TimeDuration;
 
 import java.io.IOException;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /** Server utilities for internal use. */
@@ -35,17 +41,18 @@ public final class ServerImplUtils {
   private ServerImplUtils() {
     //Never constructed
   }
-  /** For the case that all {@link RaftServerImpl} objects share the same {@link StateMachine}. */
+
+  /** Create a {@link RaftServerProxy}. */
   public static RaftServerProxy newRaftServer(
       RaftPeerId id, RaftGroup group, StateMachine.Registry stateMachineRegistry,
       RaftProperties properties, Parameters parameters) throws IOException {
-    RaftServerProxy.LOG.debug("newRaftServer: {}, {}", id, group);
+    RaftServer.LOG.debug("newRaftServer: {}, {}", id, group);
     final RaftServerProxy proxy = newRaftServer(id, stateMachineRegistry, properties, parameters);
     proxy.initGroups(group);
     return proxy;
   }
 
-  public static RaftServerProxy newRaftServer(
+  private static RaftServerProxy newRaftServer(
       RaftPeerId id, StateMachine.Registry stateMachineRegistry, RaftProperties properties, Parameters parameters)
       throws IOException {
     final TimeDuration sleepTime = TimeDuration.valueOf(500, TimeUnit.MILLISECONDS);
@@ -54,64 +61,25 @@ public final class ServerImplUtils {
       // attempt multiple times to avoid temporary bind exception
       proxy = JavaUtils.attemptRepeatedly(
           () -> new RaftServerProxy(id, stateMachineRegistry, properties, parameters),
-          5, sleepTime, "new RaftServerProxy", RaftServerProxy.LOG);
+          5, sleepTime, "new RaftServerProxy", RaftServer.LOG);
     } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
       throw IOUtils.toInterruptedIOException(
           "Interrupted when creating RaftServer " + id, e);
     }
     return proxy;
   }
 
-  public static TermIndex newTermIndex(long term, long index) {
-    return new TermIndexImpl(term, index);
+  public static RaftConfiguration newRaftConfiguration(List<RaftPeer> conf, long index, List<RaftPeer> oldConf) {
+    final RaftConfigurationImpl.Builder b = RaftConfigurationImpl.newBuilder()
+        .setConf(conf)
+        .setLogEntryIndex(index);
+    Optional.ofNullable(oldConf).filter(p -> p.size() > 0).ifPresent(b::setOldConf);
+    return b.build();
   }
 
-  private static class TermIndexImpl implements TermIndex {
-    private final long term;
-    private final long index; //log index; first index is 1.
-
-    TermIndexImpl(long term, long logIndex) {
-      this.term = term;
-      this.index = logIndex;
-    }
-
-    @Override
-    public long getTerm() {
-      return term;
-    }
-
-    @Override
-    public long getIndex() {
-      return index;
-    }
-
-    @Override
-    public int compareTo(TermIndex that) {
-      final int d = Long.compare(this.getTerm(), that.getTerm());
-      return d != 0 ? d : Long.compare(this.getIndex(), that.getIndex());
-    }
-
-    @Override
-    public boolean equals(Object obj) {
-      if (obj == this) {
-        return true;
-      } else if (obj == null || !(obj instanceof TermIndexImpl)) {
-        return false;
-      }
-
-      final TermIndexImpl that = (TermIndexImpl) obj;
-      return this.getTerm() == that.getTerm()
-          && this.getIndex() == that.getIndex();
-    }
-
-    @Override
-    public int hashCode() {
-      return Long.hashCode(term) ^ Long.hashCode(index);
-    }
-
-    @Override
-    public String toString() {
-      return TermIndex.toString(term, index);
-    }
+  static long effectiveCommitIndex(long leaderCommitIndex, TermIndex followerPrevious, int numAppendEntries) {
+    final long p = Optional.ofNullable(followerPrevious).map(TermIndex::getIndex).orElse(RaftLog.LEAST_VALID_LOG_INDEX);
+    return Math.min(leaderCommitIndex, p + numAppendEntries);
   }
 }

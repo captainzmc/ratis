@@ -18,8 +18,9 @@
 package org.apache.ratis.grpc;
 
 import org.apache.ratis.protocol.RaftClientReply;
-import org.apache.ratis.protocol.ServerNotReadyException;
-import org.apache.ratis.protocol.TimeoutIOException;
+import org.apache.ratis.protocol.exceptions.ServerNotReadyException;
+import org.apache.ratis.protocol.exceptions.TimeoutIOException;
+import org.apache.ratis.thirdparty.io.grpc.ManagedChannel;
 import org.apache.ratis.thirdparty.io.grpc.Metadata;
 import org.apache.ratis.thirdparty.io.grpc.Status;
 import org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException;
@@ -30,13 +31,17 @@ import org.apache.ratis.util.LogUtils;
 import org.apache.ratis.util.ReflectionUtils;
 import org.apache.ratis.util.function.CheckedSupplier;
 import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
 public interface GrpcUtil {
+  static final Logger LOG = LoggerFactory.getLogger(GrpcUtil.class);
+
   Metadata.Key<String> EXCEPTION_TYPE_KEY =
       Metadata.Key.of("exception-type", Metadata.ASCII_STRING_MARSHALLER);
   Metadata.Key<byte[]> EXCEPTION_OBJECT_KEY =
@@ -111,11 +116,10 @@ public interface GrpcUtil {
       final String className = trailers.get(EXCEPTION_TYPE_KEY);
       if (className != null) {
         try {
-          Class<?> clazz = Class.forName(className);
-          final Exception unwrapped = ReflectionUtils.instantiateException(
-              clazz.asSubclass(Exception.class), status.getDescription(), se);
-          return IOUtils.asIOException(unwrapped);
-        } catch (Exception e) {
+          final Class<? extends Throwable> clazz = Class.forName(className).asSubclass(Throwable.class);
+          final Throwable unwrapped = ReflectionUtils.instantiateException(clazz, status.getDescription());
+          return IOUtils.asIOException(unwrapped.initCause(se));
+        } catch (Throwable e) {
           se.addSuppressed(e);
           return new IOException(se);
         }
@@ -196,6 +200,36 @@ public interface GrpcUtil {
 
     Metadata build() {
       return trailers;
+    }
+  }
+
+  /**
+   * Tries to gracefully shut down the managed channel. Falls back to forceful shutdown if
+   * graceful shutdown times out.
+   */
+  static void shutdownManagedChannel(ManagedChannel managedChannel) {
+    // Close the gRPC managed-channel if not shut down already.
+    if (!managedChannel.isShutdown()) {
+      try {
+        managedChannel.shutdown();
+        if (!managedChannel.awaitTermination(3, TimeUnit.SECONDS)) {
+          LOG.warn("Timed out gracefully shutting down connection: {}. ", managedChannel);
+        }
+      } catch (Exception e) {
+        LOG.error("Unexpected exception while waiting for channel termination", e);
+      }
+    }
+
+    // Forceful shut down if still not terminated.
+    if (!managedChannel.isTerminated()) {
+      try {
+        managedChannel.shutdownNow();
+        if (!managedChannel.awaitTermination(2, TimeUnit.SECONDS)) {
+          LOG.warn("Timed out forcefully shutting down connection: {}. ", managedChannel);
+        }
+      } catch (Exception e) {
+        LOG.error("Unexpected exception while waiting for channel termination", e);
+      }
     }
   }
 }

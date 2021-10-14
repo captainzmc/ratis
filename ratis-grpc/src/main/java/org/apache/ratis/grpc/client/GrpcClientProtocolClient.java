@@ -23,6 +23,7 @@ import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.grpc.GrpcConfigKeys;
 import org.apache.ratis.grpc.GrpcTlsConfig;
 import org.apache.ratis.grpc.GrpcUtil;
+import org.apache.ratis.grpc.metrics.intercept.client.MetricClientInterceptor;
 import org.apache.ratis.proto.RaftProtos.GroupInfoReplyProto;
 import org.apache.ratis.proto.RaftProtos.GroupInfoRequestProto;
 import org.apache.ratis.proto.RaftProtos.GroupListReplyProto;
@@ -31,18 +32,18 @@ import org.apache.ratis.proto.RaftProtos.GroupManagementRequestProto;
 import org.apache.ratis.proto.RaftProtos.RaftClientReplyProto;
 import org.apache.ratis.proto.RaftProtos.RaftClientRequestProto;
 import org.apache.ratis.proto.RaftProtos.SetConfigurationRequestProto;
-import org.apache.ratis.protocol.LeaderNotReadyException;
-import org.apache.ratis.protocol.TimeoutIOException;
+import org.apache.ratis.proto.RaftProtos.TransferLeadershipRequestProto;
+import org.apache.ratis.protocol.exceptions.LeaderNotReadyException;
+import org.apache.ratis.protocol.exceptions.TimeoutIOException;
 import org.apache.ratis.thirdparty.io.grpc.netty.GrpcSslContexts;
 import org.apache.ratis.thirdparty.io.netty.handler.ssl.SslContextBuilder;
 import org.apache.ratis.proto.grpc.AdminProtocolServiceGrpc;
 import org.apache.ratis.proto.grpc.AdminProtocolServiceGrpc.AdminProtocolServiceBlockingStub;
 import org.apache.ratis.proto.grpc.RaftClientProtocolServiceGrpc;
-import org.apache.ratis.proto.grpc.RaftClientProtocolServiceGrpc.RaftClientProtocolServiceBlockingStub;
 import org.apache.ratis.proto.grpc.RaftClientProtocolServiceGrpc.RaftClientProtocolServiceStub;
-import org.apache.ratis.protocol.AlreadyClosedException;
+import org.apache.ratis.protocol.exceptions.AlreadyClosedException;
 import org.apache.ratis.protocol.ClientId;
-import org.apache.ratis.protocol.NotLeaderException;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.RaftPeer;
@@ -63,6 +64,7 @@ import org.slf4j.LoggerFactory;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -77,29 +79,55 @@ public class GrpcClientProtocolClient implements Closeable {
 
   private final Supplier<String> name;
   private final RaftPeer target;
-  private final ManagedChannel channel;
+  private final ManagedChannel clientChannel;
+  private final ManagedChannel adminChannel;
 
   private final TimeDuration requestTimeoutDuration;
   private final TimeDuration watchRequestTimeoutDuration;
   private final TimeoutScheduler scheduler = TimeoutScheduler.getInstance();
 
-  private final RaftClientProtocolServiceBlockingStub blockingStub;
   private final RaftClientProtocolServiceStub asyncStub;
   private final AdminProtocolServiceBlockingStub adminBlockingStub;
 
   private final AtomicReference<AsyncStreamObservers> orderedStreamObservers = new AtomicReference<>();
 
   private final AtomicReference<AsyncStreamObservers> unorderedStreamObservers = new AtomicReference<>();
+  private final MetricClientInterceptor metricClientInterceptor;
 
-  GrpcClientProtocolClient(ClientId id, RaftPeer target, RaftProperties properties, GrpcTlsConfig tlsConf) {
+  GrpcClientProtocolClient(ClientId id, RaftPeer target, RaftProperties properties,
+      GrpcTlsConfig adminTlsConfig, GrpcTlsConfig clientTlsConfig) {
     this.name = JavaUtils.memoize(() -> id + "->" + target.getId());
     this.target = target;
     final SizeInBytes flowControlWindow = GrpcConfigKeys.flowControlWindow(properties, LOG::debug);
     final SizeInBytes maxMessageSize = GrpcConfigKeys.messageSizeMax(properties, LOG::debug);
-    NettyChannelBuilder channelBuilder =
-        NettyChannelBuilder.forTarget(target.getAddress());
+    metricClientInterceptor = new MetricClientInterceptor(getName());
 
-    if (tlsConf!= null) {
+    final String clientAddress = Optional.ofNullable(target.getClientAddress())
+        .filter(x -> !x.isEmpty()).orElse(target.getAddress());
+    final String adminAddress = Optional.ofNullable(target.getAdminAddress())
+        .filter(x -> !x.isEmpty()).orElse(target.getAddress());
+    final boolean separateAdminChannel = !Objects.equals(clientAddress, adminAddress);
+
+    clientChannel = buildChannel(clientAddress, clientTlsConfig,
+        flowControlWindow, maxMessageSize);
+    adminChannel = separateAdminChannel
+        ? buildChannel(adminAddress, adminTlsConfig,
+            flowControlWindow, maxMessageSize)
+        : clientChannel;
+
+    asyncStub = RaftClientProtocolServiceGrpc.newStub(clientChannel);
+    adminBlockingStub = AdminProtocolServiceGrpc.newBlockingStub(adminChannel);
+    this.requestTimeoutDuration = RaftClientConfigKeys.Rpc.requestTimeout(properties);
+    this.watchRequestTimeoutDuration =
+        RaftClientConfigKeys.Rpc.watchRequestTimeout(properties);
+  }
+
+  private ManagedChannel buildChannel(String address, GrpcTlsConfig tlsConf,
+      SizeInBytes flowControlWindow, SizeInBytes maxMessageSize) {
+    NettyChannelBuilder channelBuilder =
+        NettyChannelBuilder.forTarget(address);
+
+    if (tlsConf != null) {
       SslContextBuilder sslContextBuilder = GrpcSslContexts.forClient();
       if (tlsConf.isFileBasedConfig()) {
         sslContextBuilder.trustManager(tlsConf.getTrustStoreFile());
@@ -124,15 +152,11 @@ public class GrpcClientProtocolClient implements Closeable {
     } else {
       channelBuilder.negotiationType(NegotiationType.PLAINTEXT);
     }
-    channel = channelBuilder.flowControlWindow(flowControlWindow.getSizeInt())
+
+    return channelBuilder.flowControlWindow(flowControlWindow.getSizeInt())
         .maxInboundMessageSize(maxMessageSize.getSizeInt())
+        .intercept(metricClientInterceptor)
         .build();
-    blockingStub = RaftClientProtocolServiceGrpc.newBlockingStub(channel);
-    asyncStub = RaftClientProtocolServiceGrpc.newStub(channel);
-    adminBlockingStub = AdminProtocolServiceGrpc.newBlockingStub(channel);
-    this.requestTimeoutDuration = RaftClientConfigKeys.Rpc.requestTimeout(properties);
-    this.watchRequestTimeoutDuration =
-        RaftClientConfigKeys.Rpc.watchRequestTimeout(properties);
   }
 
   String getName() {
@@ -143,13 +167,12 @@ public class GrpcClientProtocolClient implements Closeable {
   public void close() {
     Optional.ofNullable(orderedStreamObservers.getAndSet(null)).ifPresent(AsyncStreamObservers::close);
     Optional.ofNullable(unorderedStreamObservers.getAndSet(null)).ifPresent(AsyncStreamObservers::close);
-    channel.shutdown();
-    try {
-      channel.awaitTermination(5, TimeUnit.SECONDS);
-    } catch (Exception e) {
-      LOG.error("Unexpected exception while waiting for channel termination", e);
+    GrpcUtil.shutdownManagedChannel(clientChannel);
+    if (clientChannel != adminChannel) {
+      GrpcUtil.shutdownManagedChannel(adminChannel);
     }
     scheduler.close();
+    metricClientInterceptor.close();
   }
 
   RaftClientReplyProto groupAdd(GroupManagementRequestProto request) throws IOException {
@@ -170,12 +193,20 @@ public class GrpcClientProtocolClient implements Closeable {
         .groupInfo(request);
   }
 
-
   RaftClientReplyProto setConfiguration(
       SetConfigurationRequestProto request) throws IOException {
-    return blockingCall(() -> blockingStub
+    return blockingCall(() -> adminBlockingStub
         .withDeadlineAfter(requestTimeoutDuration.getDuration(), requestTimeoutDuration.getUnit())
         .setConfiguration(request));
+  }
+
+  RaftClientReplyProto transferLeadership(
+      TransferLeadershipRequestProto request) throws IOException {
+    TimeDuration newDuration = requestTimeoutDuration.add(
+        request.getRpcRequest().getTimeoutMs(), TimeUnit.MILLISECONDS);
+    return blockingCall(() -> adminBlockingStub
+        .withDeadlineAfter(newDuration.getDuration(), newDuration.getUnit())
+        .transferLeadership(request));
   }
 
   private static RaftClientReplyProto blockingCall(
@@ -233,7 +264,7 @@ public class GrpcClientProtocolClient implements Closeable {
 
     @Override
     public String toString() {
-      return getName() + ":" + getClass().getSimpleName();
+      return getName() + ":" + JavaUtils.getClassSimpleName(getClass());
     }
   }
 
@@ -284,8 +315,8 @@ public class GrpcClientProtocolClient implements Closeable {
             return;
           }
           handleReplyFuture(callId, f -> f.complete(reply));
-        } catch (Throwable t) {
-          handleReplyFuture(callId, f -> f.completeExceptionally(t));
+        } catch (Exception e) {
+          handleReplyFuture(callId, f -> f.completeExceptionally(e));
         }
       }
 
@@ -316,7 +347,7 @@ public class GrpcClientProtocolClient implements Closeable {
         if (!requestStreamer.onNext(ClientProtoUtils.toRaftClientRequestProto(request))) {
           return JavaUtils.completeExceptionally(new AlreadyClosedException(getName() + ": the stream is closed."));
         }
-      } catch(Throwable t) {
+      } catch(Exception t) {
         handleReplyFuture(request.getCallId(), future -> future.completeExceptionally(t));
         return f;
       }

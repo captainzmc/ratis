@@ -17,17 +17,24 @@
  */
 package org.apache.ratis.server.raftlog.segmented;
 
+import static org.apache.ratis.server.metrics.SegmentedRaftLogMetrics.*;
+
 import java.io.IOException;
 import java.util.Iterator;
 import java.util.stream.IntStream;
 
 import org.apache.ratis.RaftTestUtil.SimpleOperation;
 import org.apache.ratis.conf.RaftProperties;
-import org.apache.ratis.server.impl.ServerProtoUtils;
+import org.apache.ratis.metrics.RatisMetricRegistry;
+import org.apache.ratis.server.impl.RaftServerTestUtil;
+import org.apache.ratis.server.metrics.SegmentedRaftLogMetrics;
 import org.apache.ratis.server.protocol.TermIndex;
+import org.apache.ratis.server.raftlog.LogEntryHeader;
+import org.apache.ratis.server.raftlog.LogProtoUtils;
 import org.apache.ratis.server.raftlog.segmented.SegmentedRaftLogCache.TruncationSegments;
 import org.apache.ratis.server.raftlog.segmented.LogSegment.LogRecord;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -36,18 +43,27 @@ public class TestSegmentedRaftLogCache {
   private static final RaftProperties prop = new RaftProperties();
 
   private SegmentedRaftLogCache cache;
+  private SegmentedRaftLogMetrics raftLogMetrics;
+  private RatisMetricRegistry ratisMetricRegistry;
 
   @Before
   public void setup() {
-    cache = new SegmentedRaftLogCache(null, null, prop);
+    raftLogMetrics = new SegmentedRaftLogMetrics(RaftServerTestUtil.TEST_MEMBER_ID);
+    ratisMetricRegistry = raftLogMetrics.getRegistry();
+    cache = new SegmentedRaftLogCache(null, null, prop, raftLogMetrics);
+  }
+
+  @After
+  public void clear() {
+    raftLogMetrics.unregister();
   }
 
   private LogSegment prepareLogSegment(long start, long end, boolean isOpen) {
     LogSegment s = LogSegment.newOpenSegment(null, start, null);
     for (long i = start; i <= end; i++) {
       SimpleOperation m = new SimpleOperation("m" + i);
-      LogEntryProto entry = ServerProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, i);
-      s.appendToOpenSegment(entry);
+      LogEntryProto entry = LogProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, i);
+      s.appendToOpenSegment(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
     }
     if (!isOpen) {
       s.close();
@@ -78,7 +94,7 @@ public class TestSegmentedRaftLogCache {
   }
 
   private void checkCacheEntries(long offset, int size, long end) {
-    TermIndex[] entries = cache.getTermIndices(offset, offset + size);
+    final LogEntryHeader[] entries = cache.getTermIndices(offset, offset + size);
     long realEnd = offset + size > end + 1 ? end + 1 : offset + size;
     Assert.assertEquals(realEnd - offset, entries.length);
     for (long i = offset; i < realEnd; i++) {
@@ -137,8 +153,8 @@ public class TestSegmentedRaftLogCache {
 
     final SimpleOperation m = new SimpleOperation("m");
     try {
-      LogEntryProto entry = ServerProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, 0);
-      cache.appendEntry(entry);
+      LogEntryProto entry = LogProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, 0);
+      cache.appendEntry(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
       Assert.fail("the open segment is null");
     } catch (IllegalStateException ignored) {
     }
@@ -146,8 +162,8 @@ public class TestSegmentedRaftLogCache {
     LogSegment openSegment = prepareLogSegment(100, 100, true);
     cache.addSegment(openSegment);
     for (long index = 101; index < 200; index++) {
-      LogEntryProto entry = ServerProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, index);
-      cache.appendEntry(entry);
+      LogEntryProto entry = LogProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, index);
+      cache.appendEntry(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
     }
 
     Assert.assertNotNull(cache.getOpenSegment());
@@ -248,8 +264,9 @@ public class TestSegmentedRaftLogCache {
 
     int purgeIndex = (end - start) * segmentSize - 1;
 
-    // overlapped close segment will not purged.
-    TruncationSegments ts = cache.purge(purgeIndex);
+    // overlapped close segment will not purged. Passing in index - 1 since
+    // we purge a closed segment when end index == passed in purge index.
+    TruncationSegments ts = cache.purge(purgeIndex - 1);
     Assert.assertNull(ts.getToTruncate());
     Assert.assertEquals(end - start - 1, ts.getToDelete().length);
     Assert.assertEquals(1, cache.getNumOfSegments());
@@ -300,5 +317,24 @@ public class TestSegmentedRaftLogCache {
 
     Iterator<TermIndex> iterator = cache.iterator(300);
     Assert.assertFalse(iterator.hasNext());
+  }
+
+  @Test
+  public void testCacheMetric() {
+    cache.addSegment(prepareLogSegment(0, 99, false));
+    cache.addSegment(prepareLogSegment(100, 200, false));
+    cache.addSegment(prepareLogSegment(201, 300, true));
+
+    Long closedSegmentsNum = (Long) ratisMetricRegistry.getGauges((s, metric) ->
+        s.contains(RAFT_LOG_CACHE_CLOSED_SEGMENTS_NUM)).values().iterator().next().getValue();
+    Assert.assertEquals(2L, closedSegmentsNum.longValue());
+
+    Long closedSegmentsSizeInBytes = (Long) ratisMetricRegistry.getGauges((s, metric) ->
+        s.contains(RAFT_LOG_CACHE_CLOSED_SEGMENTS_SIZE_IN_BYTES)).values().iterator().next().getValue();
+    Assert.assertEquals(closedSegmentsSizeInBytes.longValue(), cache.getClosedSegmentsSizeInBytes());
+
+    Long openSegmentSizeInBytes = (Long) ratisMetricRegistry.getGauges((s, metric) ->
+        s.contains(RAFT_LOG_CACHE_OPEN_SEGMENT_SIZE_IN_BYTES)).values().iterator().next().getValue();
+    Assert.assertEquals(openSegmentSizeInBytes.longValue(), cache.getOpenSegmentSizeInBytes());
   }
 }

@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -17,19 +17,20 @@
  */
 package org.apache.ratis.netty;
 
-import org.apache.ratis.MiniRaftCluster;
 import org.apache.ratis.RaftConfigKeys;
 import org.apache.ratis.RaftTestUtil;
+import org.apache.ratis.conf.Parameters;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.netty.server.NettyRpcService;
 import org.apache.ratis.protocol.RaftGroup;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.apache.ratis.rpc.SupportedRpcType;
-import org.apache.ratis.server.impl.*;
-import org.apache.ratis.statemachine.StateMachine;
+import org.apache.ratis.server.impl.DelayLocalExecutionInjection;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 
-import java.io.IOException;
-
+/**
+ * A {@link MiniRaftCluster} with {{@link SupportedRpcType#NETTY}} and data stream disabled.
+ */
 public class MiniRaftClusterWithNetty extends MiniRaftCluster.RpcBase {
   public static final Factory<MiniRaftClusterWithNetty> FACTORY
       = new Factory<MiniRaftClusterWithNetty>() {
@@ -50,16 +51,14 @@ public class MiniRaftClusterWithNetty extends MiniRaftCluster.RpcBase {
   public static final DelayLocalExecutionInjection sendServerRequest
       = new DelayLocalExecutionInjection(NettyRpcService.SEND_SERVER_REQUEST);
 
-  private MiniRaftClusterWithNetty(String[] ids, RaftProperties properties) {
+  protected MiniRaftClusterWithNetty(String[] ids, RaftProperties properties) {
     super(ids, properties, null);
   }
 
   @Override
-  protected RaftServerProxy newRaftServer(
-      RaftPeerId id, StateMachine.Registry stateMachineRegistry , RaftGroup group,
-      RaftProperties properties) throws IOException {
+  protected Parameters setPropertiesAndInitParameters(RaftPeerId id, RaftGroup group, RaftProperties properties) {
     NettyConfigKeys.Server.setPort(properties, getPort(id, group));
-    return ServerImplUtils.newRaftServer(id, group, stateMachineRegistry, properties, null);
+    return null;
   }
 
   @Override

@@ -17,11 +17,16 @@
  */
 package org.apache.ratis.examples.filestore;
 
+import org.apache.ratis.conf.ConfUtils;
+import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.examples.filestore.FileInfo.ReadOnly;
 import org.apache.ratis.examples.filestore.FileInfo.UnderConstruction;
 import org.apache.ratis.proto.ExamplesProtos.ReadReplyProto;
+import org.apache.ratis.proto.ExamplesProtos.StreamWriteReplyProto;
 import org.apache.ratis.proto.ExamplesProtos.WriteReplyProto;
 import org.apache.ratis.protocol.RaftPeerId;
+import org.apache.ratis.statemachine.StateMachine;
+import org.apache.ratis.statemachine.StateMachine.DataStream;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.apache.ratis.util.CollectionUtils;
 import org.apache.ratis.util.FileUtils;
@@ -33,13 +38,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
+import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -89,27 +100,57 @@ public class FileStore implements Closeable {
   }
 
   private final Supplier<RaftPeerId> idSupplier;
-  private final Supplier<Path> rootSupplier;
+  private final List<Supplier<Path>> rootSuppliers;
   private final FileMap files;
 
-  private final ExecutorService writer = Executors.newFixedThreadPool(10);
-  private final ExecutorService committer = Executors.newFixedThreadPool(3);
-  private final ExecutorService reader = Executors.newFixedThreadPool(10);
-  private final ExecutorService deleter = Executors.newFixedThreadPool(3);
+  private final ExecutorService writer;
+  private final ExecutorService committer;
+  private final ExecutorService reader;
+  private final ExecutorService deleter;
 
-  public FileStore(Supplier<RaftPeerId> idSupplier, Path dir) {
+  public FileStore(Supplier<RaftPeerId> idSupplier, RaftProperties properties) {
     this.idSupplier = idSupplier;
-    this.rootSupplier = JavaUtils.memoize(
-        () -> dir.resolve(getId().toString()).normalize().toAbsolutePath());
+    this.rootSuppliers = new ArrayList<>();
+
+    int writeThreadNum = ConfUtils.getInt(properties::getInt, FileStoreCommon.STATEMACHINE_WRITE_THREAD_NUM,
+        1, LOG::info);
+    int readThreadNum = ConfUtils.getInt(properties::getInt, FileStoreCommon.STATEMACHINE_READ_THREAD_NUM,
+        1, LOG::info);
+    int commitThreadNum = ConfUtils.getInt(properties::getInt, FileStoreCommon.STATEMACHINE_COMMIT_THREAD_NUM,
+        1, LOG::info);
+    int deleteThreadNum = ConfUtils.getInt(properties::getInt, FileStoreCommon.STATEMACHINE_DELETE_THREAD_NUM,
+        1, LOG::info);
+    writer = Executors.newFixedThreadPool(writeThreadNum);
+    reader = Executors.newFixedThreadPool(readThreadNum);
+    committer = Executors.newFixedThreadPool(commitThreadNum);
+    deleter = Executors.newFixedThreadPool(deleteThreadNum);
+
+    final List<File> dirs = ConfUtils.getFiles(properties::getFiles, FileStoreCommon.STATEMACHINE_DIR_KEY,
+        null, LOG::info);
+    Objects.requireNonNull(dirs, FileStoreCommon.STATEMACHINE_DIR_KEY + " is not set.");
+    for (File dir : dirs) {
+      this.rootSuppliers.add(
+          JavaUtils.memoize(() -> dir.toPath().resolve(getId().toString()).normalize().toAbsolutePath()));
+    }
     this.files = new FileMap(JavaUtils.memoize(() -> idSupplier.get() + ":files"));
   }
 
   public RaftPeerId getId() {
-    return Objects.requireNonNull(idSupplier.get(), getClass().getSimpleName() + " is not initialized.");
+    return Objects.requireNonNull(idSupplier.get(),
+        () -> JavaUtils.getClassSimpleName(getClass()) + " is not initialized.");
   }
 
-  public Path getRoot() {
-    return rootSupplier.get();
+  private Path getRoot(Path relative) {
+    int hash = relative.toAbsolutePath().toString().hashCode() % rootSuppliers.size();
+    return rootSuppliers.get(Math.abs(hash)).get();
+  }
+
+  public List<Path> getRoots() {
+    List<Path> roots = new ArrayList<>();
+    for (Supplier<Path> s : rootSuppliers) {
+      roots.add(s.get());
+    }
+    return roots;
   }
 
   static Path normalize(String path) {
@@ -118,7 +159,7 @@ public class FileStore implements Closeable {
   }
 
   Path resolve(Path relative) throws IOException {
-    final Path root = getRoot();
+    final Path root = getRoot(relative);
     final Path full = root.resolve(relative).normalize().toAbsolutePath();
     if (full.equals(root)) {
       throw new IOException("The file path " + relative + " resolved to " + full
@@ -130,7 +171,7 @@ public class FileStore implements Closeable {
     return full;
   }
 
-  CompletableFuture<ReadReplyProto> read(String relative, long offset, long length) {
+  CompletableFuture<ReadReplyProto> read(String relative, long offset, long length, boolean readCommitted) {
     final Supplier<String> name = () -> "read(" + relative
         + ", " + offset + ", " + length + ") @" + getId();
     final CheckedSupplier<ReadReplyProto, IOException> task = LogUtils.newCheckedSupplier(LOG, () -> {
@@ -139,7 +180,7 @@ public class FileStore implements Closeable {
           .setResolvedPath(FileStoreCommon.toByteString(info.getRelativePath()))
           .setOffset(offset);
 
-      final ByteString bytes = info.read(this::resolve, offset, length);
+      final ByteString bytes = info.read(this::resolve, offset, length, readCommitted);
       return reply.setData(bytes).build();
     }, name);
     return submit(task, reader);
@@ -188,7 +229,7 @@ public class FileStore implements Closeable {
   }
 
   CompletableFuture<Integer> write(
-      long index, String relative, boolean close, long offset, ByteString data) {
+      long index, String relative, boolean close, boolean sync, long offset, ByteString data) {
     final int size = data != null? data.size(): 0;
     LOG.trace("write {}, offset={}, size={}, close? {} @{}:{}",
         relative, offset, size, close, getId(), index);
@@ -207,8 +248,8 @@ public class FileStore implements Closeable {
     }
 
     return size == 0 && !close? CompletableFuture.completedFuture(0)
-        : createNew? uc.submitCreate(this::resolve, data, close, writer, getId(), index)
-        : uc.submitWrite(offset, data, close, writer, getId(), index);
+        : createNew? uc.submitCreate(this::resolve, data, close, sync, writer, getId(), index)
+        : uc.submitWrite(offset, data, close, sync, writer, getId(), index);
   }
 
   @Override
@@ -217,5 +258,76 @@ public class FileStore implements Closeable {
     committer.shutdownNow();
     reader.shutdownNow();
     deleter.shutdownNow();
+  }
+
+  CompletableFuture<StreamWriteReplyProto> streamCommit(String p, long bytesWritten) {
+    return CompletableFuture.supplyAsync(() -> {
+      long len = 0;
+      try {
+        final Path full = resolve(normalize(p));
+        RandomAccessFile file = new RandomAccessFile(full.toFile(), "r");
+        len = file.length();
+        return StreamWriteReplyProto.newBuilder().setIsSuccess(len == bytesWritten).setByteWritten(len).build();
+      } catch (IOException e) {
+        throw new CompletionException("Failed to commit stream write on file:" + p +
+        ", expected written bytes:" + bytesWritten + ", actual written bytes:" + len, e);
+      }
+    }, committer);
+  }
+
+  CompletableFuture<?> streamLink(DataStream dataStream) {
+    return CompletableFuture.supplyAsync(() -> {
+      if (dataStream == null) {
+        return JavaUtils.completeExceptionally(new IllegalStateException("Null stream"));
+      }
+      if (dataStream.getDataChannel().isOpen()) {
+        return JavaUtils.completeExceptionally(
+            new IllegalStateException("DataStream: " + dataStream + " is not closed properly"));
+      } else {
+        return CompletableFuture.completedFuture(null);
+      }
+    }, committer);
+  }
+
+  public CompletableFuture<FileStoreDataChannel> createDataChannel(String p) {
+    return CompletableFuture.supplyAsync(() -> {
+      try {
+        final Path full = resolve(normalize(p));
+        return new FileStoreDataChannel(full);
+      } catch (IOException e) {
+        throw new CompletionException("Failed to create " + p, e);
+      }
+    }, writer);
+  }
+
+  static class FileStoreDataChannel implements StateMachine.DataChannel {
+    private final Path path;
+    private final RandomAccessFile randomAccessFile;
+
+    FileStoreDataChannel(Path path) throws FileNotFoundException {
+      this.path = path;
+      this.randomAccessFile = new RandomAccessFile(path.toFile(), "rw");
+    }
+
+    @Override
+    public void force(boolean metadata) throws IOException {
+      LOG.debug("force({}) at {}", metadata, path);
+      randomAccessFile.getChannel().force(metadata);
+    }
+
+    @Override
+    public int write(ByteBuffer src) throws IOException {
+      return randomAccessFile.getChannel().write(src);
+    }
+
+    @Override
+    public boolean isOpen() {
+      return randomAccessFile.getChannel().isOpen();
+    }
+
+    @Override
+    public void close() throws IOException {
+      randomAccessFile.close();
+    }
   }
 }

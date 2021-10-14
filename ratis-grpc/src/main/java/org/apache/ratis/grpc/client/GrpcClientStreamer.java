@@ -23,6 +23,7 @@ import org.apache.ratis.grpc.GrpcConfigKeys;
 import org.apache.ratis.grpc.GrpcTlsConfig;
 import org.apache.ratis.grpc.GrpcUtil;
 import org.apache.ratis.protocol.*;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.apache.ratis.proto.RaftProtos.RaftClientReplyProto;
 import org.apache.ratis.proto.RaftProtos.RaftClientRequestProto;
@@ -79,6 +80,7 @@ public class GrpcClientStreamer implements Closeable {
   private RaftPeerId leaderId;
   private volatile GrpcClientProtocolProxy leaderProxy;
   private final ClientId clientId;
+  private final String name;
 
   private volatile RunningState running = RunningState.RUNNING;
   private final ExceptionAndRetry exceptionAndRetry;
@@ -88,6 +90,7 @@ public class GrpcClientStreamer implements Closeable {
   GrpcClientStreamer(RaftProperties prop, RaftGroup group,
       RaftPeerId leaderId, ClientId clientId, GrpcTlsConfig tlsConfig) {
     this.clientId = clientId;
+    this.name = JavaUtils.getClassSimpleName(getClass()) + "-" + clientId;
     maxPendingNum = GrpcConfigKeys.OutputStream.outstandingAppendsMax(prop);
     maxMessageSize = GrpcConfigKeys.messageSizeMax(prop, LOG::debug);
     dataQueue = new ConcurrentLinkedDeque<>();
@@ -100,7 +103,7 @@ public class GrpcClientStreamer implements Closeable {
     proxyMap = new PeerProxyMap<>(clientId.toString(),
         raftPeer -> new GrpcClientProtocolProxy(clientId, raftPeer,
             ResponseHandler::new, prop, tlsConfig));
-    proxyMap.addPeers(group.getPeers());
+    proxyMap.addRaftPeers(group.getPeers());
     refreshLeaderProxy(leaderId, null);
 
     senderThread = new Sender();
@@ -153,6 +156,7 @@ public class GrpcClientStreamer implements Closeable {
       try {
         wait();
       } catch (InterruptedException ignored) {
+        Thread.currentThread().interrupt();
       }
     }
     if (isRunning()) {
@@ -180,6 +184,7 @@ public class GrpcClientStreamer implements Closeable {
       try {
         wait();
       } catch (InterruptedException ignored) {
+        Thread.currentThread().interrupt();
       }
     }
     if (!isRunning() && (!dataQueue.isEmpty() || !ackQueue.isEmpty())) {
@@ -199,13 +204,14 @@ public class GrpcClientStreamer implements Closeable {
     try {
       senderThread.join();
     } catch (InterruptedException ignored) {
+      Thread.currentThread().interrupt();
     }
     proxyMap.close();
   }
 
   @Override
   public String toString() {
-    return this.getClass().getSimpleName() + "-" + clientId;
+    return name;
   }
 
   private class Sender extends Daemon {
@@ -218,6 +224,7 @@ public class GrpcClientStreamer implements Closeable {
             try {
               GrpcClientStreamer.this.wait();
             } catch (InterruptedException ignored) {
+              Thread.currentThread().interrupt();
             }
           }
           if (running == RunningState.RUNNING) {
@@ -308,7 +315,7 @@ public class GrpcClientStreamer implements Closeable {
     }
 
     @Override // called by handleError and handleNotLeader
-    public void close() throws IOException {
+    public void close() {
       active = false;
     }
   }
@@ -330,8 +337,7 @@ public class GrpcClientStreamer implements Closeable {
     refreshLeader(nle.getSuggestedLeader().getId(), oldLeader);
   }
 
-  private void handleError(Throwable t, ResponseHandler handler) {
-    Preconditions.assertTrue(Thread.holdsLock(GrpcClientStreamer.this));
+  private synchronized void handleError(Throwable t, ResponseHandler handler) {
     final IOException e = GrpcUtil.unwrapIOException(t);
 
     exceptionAndRetry.addException(handler.targetId, e);
@@ -358,6 +364,7 @@ public class GrpcClientStreamer implements Closeable {
     try {
       exceptionAndRetry.retryInterval.sleep();
     } catch (InterruptedException ignored) {
+      Thread.currentThread().interrupt();
     }
     leaderProxy.onNext(request);
   }

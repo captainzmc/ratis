@@ -17,14 +17,14 @@
  */
 package org.apache.ratis.grpc;
 
-import org.apache.ratis.MiniRaftCluster;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.RaftBasicTests;
 import org.apache.ratis.RaftTestUtil;
 import org.apache.ratis.client.RaftClient;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.server.impl.BlockRequestHandlingInjection;
 import org.apache.ratis.server.impl.RaftServerTestUtil;
-import org.apache.ratis.server.protocol.TermIndex;
+import org.apache.ratis.server.raftlog.LogEntryHeader;
 import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.statemachine.SimpleStateMachine4Testing;
 import org.apache.ratis.statemachine.StateMachine;
@@ -75,32 +75,32 @@ public class TestRaftWithGrpc
     try (final RaftClient client = cluster.createClient()) {
       // block append requests
       cluster.getServerAliveStream()
-          .filter(impl -> !impl.isLeader())
+          .filter(impl -> !impl.getInfo().isLeader())
           .map(SimpleStateMachine4Testing::get)
           .forEach(SimpleStateMachine4Testing::blockWriteStateMachineData);
 
       CompletableFuture<RaftClientReply>
-          replyFuture = client.sendAsync(new RaftTestUtil.SimpleMessage("abc"));
+          replyFuture = client.async().send(new RaftTestUtil.SimpleMessage("abc"));
       TimeDuration.valueOf(5 , TimeUnit.SECONDS).sleep();
       // replyFuture should not be completed until append request is unblocked.
-      Assert.assertTrue(!replyFuture.isDone());
+      Assert.assertFalse(replyFuture.isDone());
       // unblock append request.
       cluster.getServerAliveStream()
-          .filter(impl -> !impl.isLeader())
+          .filter(impl -> !impl.getInfo().isLeader())
           .map(SimpleStateMachine4Testing::get)
           .forEach(SimpleStateMachine4Testing::unblockWriteStateMachineData);
 
-      final RaftLog leaderLog = cluster.getLeader().getState().getLog();
+      final RaftLog leaderLog = cluster.getLeader().getRaftLog();
       // The entries have been appended in the followers
       // although the append entry timed out at the leader
-      cluster.getServerAliveStream().filter(impl -> !impl.isLeader()).forEach(raftServer ->
+      cluster.getServerAliveStream().filter(impl -> !impl.getInfo().isLeader()).forEach(raftServer ->
           JavaUtils.runAsUnchecked(() -> JavaUtils.attempt(() -> {
         final long leaderNextIndex = leaderLog.getNextIndex();
-        final TermIndex[] leaderEntries = leaderLog.getEntries(0, Long.MAX_VALUE);
+        final LogEntryHeader[] leaderEntries = leaderLog.getEntries(0, Long.MAX_VALUE);
 
-        final RaftLog followerLog = raftServer.getState().getLog();
+        final RaftLog followerLog = raftServer.getRaftLog();
         Assert.assertEquals(leaderNextIndex, followerLog.getNextIndex());
-        final TermIndex[] serverEntries = followerLog.getEntries(0, Long.MAX_VALUE);
+        final LogEntryHeader[] serverEntries = followerLog.getEntries(0, Long.MAX_VALUE);
         Assert.assertArrayEquals(serverEntries, leaderEntries);
       }, 10, HUNDRED_MILLIS, "assertRaftLog-" + raftServer.getId(), LOG)));
 

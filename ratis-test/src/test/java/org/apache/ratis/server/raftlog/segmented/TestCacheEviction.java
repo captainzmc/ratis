@@ -18,25 +18,26 @@
 package org.apache.ratis.server.raftlog.segmented;
 
 import org.apache.ratis.BaseTest;
-import org.apache.ratis.MiniRaftCluster;
 import org.apache.ratis.RaftTestUtil.SimpleOperation;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.protocol.RaftGroupMemberId;
 import org.apache.ratis.protocol.RaftPeerId;
+import org.apache.ratis.server.DivisionInfo;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerConstants;
-import org.apache.ratis.server.impl.RaftServerImpl;
-import org.apache.ratis.server.impl.ServerProtoUtils;
-import org.apache.ratis.server.impl.ServerState;
+import org.apache.ratis.server.impl.MiniRaftCluster;
+import org.apache.ratis.server.impl.RaftServerTestUtil;
+import org.apache.ratis.server.raftlog.LogProtoUtils;
 import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.server.raftlog.segmented.CacheInvalidationPolicy.CacheInvalidationPolicyDefault;
 import org.apache.ratis.server.raftlog.segmented.SegmentedRaftLogCache.LogSegmentList;
 import org.apache.ratis.server.raftlog.segmented.TestSegmentedRaftLog.SegmentRange;
 import org.apache.ratis.server.storage.RaftStorage;
+import org.apache.ratis.server.storage.RaftStorageTestUtils;
 import org.apache.ratis.statemachine.SimpleStateMachine4Testing;
 import org.apache.ratis.statemachine.StateMachine;
+import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.SizeInBytes;
 import org.junit.Assert;
 import org.junit.Test;
@@ -53,7 +54,7 @@ public class TestCacheEviction extends BaseTest {
 
   static LogSegmentList prepareSegments(int numSegments, boolean[] cached, long start, long size) {
     Assert.assertEquals(numSegments, cached.length);
-    final LogSegmentList segments = new LogSegmentList(TestCacheEviction.class.getSimpleName());
+    final LogSegmentList segments = new LogSegmentList(JavaUtils.getClassSimpleName(TestCacheEviction.class));
     for (int i = 0; i < numSegments; i++) {
       LogSegment s = LogSegment.newCloseSegment(null, start, start + size - 1, null);
       if (cached[i]) {
@@ -162,15 +163,12 @@ public class TestCacheEviction extends BaseTest {
 
     File storageDir = getTestDir();
     RaftServerConfigKeys.setStorageDir(prop,  Collections.singletonList(storageDir));
-    RaftStorage storage = new RaftStorage(storageDir, RaftServerConstants.StartupOption.REGULAR);
+    RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
 
-    RaftServerImpl server = Mockito.mock(RaftServerImpl.class);
-    ServerState state = Mockito.mock(ServerState.class);
-    Mockito.when(server.getState()).thenReturn(state);
-    Mockito.when(server.getFollowerNextIndices()).thenReturn(new long[]{});
-    Mockito.when(state.getLastAppliedIndex()).thenReturn(0L);
-
-    SegmentedRaftLog raftLog = new SegmentedRaftLog(memberId, server, storage, -1, prop);
+    final DivisionInfo info = Mockito.mock(DivisionInfo.class);
+    Mockito.when(info.getLastAppliedIndex()).thenReturn(0L);
+    Mockito.when(info.getFollowerNextIndices()).thenReturn(new long[]{});
+    final SegmentedRaftLog raftLog = RaftServerTestUtil.newSegmentedRaftLog(memberId, info, storage, prop);
     raftLog.open(RaftLog.INVALID_LOG_INDEX, null);
     List<SegmentRange> slist = TestSegmentedRaftLog.prepareRanges(0, maxCachedNum, 7, 0);
     LogEntryProto[] entries = generateEntries(slist);
@@ -180,8 +178,8 @@ public class TestCacheEviction extends BaseTest {
     Assert.assertEquals(maxCachedNum - 1,
         raftLog.getRaftLogCache().getCachedSegmentNum());
 
-    Mockito.when(server.getFollowerNextIndices()).thenReturn(new long[]{21, 40, 40});
-    Mockito.when(state.getLastAppliedIndex()).thenReturn(35L);
+    Mockito.when(info.getLastAppliedIndex()).thenReturn(35L);
+    Mockito.when(info.getFollowerNextIndices()).thenReturn(new long[]{21, 40, 40});
     slist = TestSegmentedRaftLog.prepareRanges(maxCachedNum, maxCachedNum + 2, 7, 7 * maxCachedNum);
     entries = generateEntries(slist);
     raftLog.append(entries).forEach(CompletableFuture::join);
@@ -197,7 +195,7 @@ public class TestCacheEviction extends BaseTest {
     for (SegmentRange range : slist) {
       for (long index = range.start; index <= range.end; index++) {
         SimpleOperation m = new SimpleOperation(new String(new byte[1024]));
-        eList.add(ServerProtoUtils.toLogEntryProto(m.getLogEntryContent(), range.term, index));
+        eList.add(LogProtoUtils.toLogEntryProto(m.getLogEntryContent(), range.term, index));
       }
     }
     return eList.toArray(new LogEntryProto[eList.size()]);

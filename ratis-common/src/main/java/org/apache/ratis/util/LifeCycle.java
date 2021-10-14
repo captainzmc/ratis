@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.function.UnaryOperator;
 
 /**
  * The life cycle of a machine.
@@ -82,6 +83,11 @@ public class LifeCycle {
       return States.CLOSING_OR_CLOSED.contains(this);
     }
 
+    /** Is this {@link State#PAUSING} or {@link State#PAUSED}? */
+    public boolean isPausingOrPaused() {
+      return States.PAUSING_OR_PAUSED.contains(this);
+    }
+
     static void put(State key, Map<State, List<State>> map, State... values) {
       map.put(key, Collections.unmodifiableList(Arrays.asList(values)));
     }
@@ -101,7 +107,7 @@ public class LifeCycle {
     }
 
     /** Is the given transition valid? */
-    static boolean isValid(State from, State to) {
+    public static boolean isValid(State from, State to) {
       return PREDECESSORS.get(to).contains(from);
     }
 
@@ -127,6 +133,9 @@ public class LifeCycle {
 
     public static final Set<State> CLOSING_OR_CLOSED
         = Collections.unmodifiableSet(EnumSet.of(State.CLOSING, State.CLOSED));
+
+    public static final Set<State> PAUSING_OR_PAUSED
+        = Collections.unmodifiableSet(EnumSet.of(State.PAUSING, State.PAUSED));
 
     public static final Set<State> CLOSING_OR_CLOSED_OR_EXCEPTION
         = Collections.unmodifiableSet(EnumSet.of(State.CLOSING, State.CLOSED, State.EXCEPTION));
@@ -161,6 +170,53 @@ public class LifeCycle {
     if (from != to) {
       State.validate(name, from, to);
     }
+  }
+
+  /**
+   * Transition from the current state to the given state only if the transition is valid.
+   * If the transition is invalid, this is a no-op.
+   *
+   * @return true if the updated state equals to the given state.
+   */
+  public boolean transitionIfValid(final State to) {
+    final State updated = current.updateAndGet(from -> State.isValid(from, to)? to : from);
+    return updated == to;
+  }
+
+  /**
+   * Transition using the given operator.
+   *
+   * @return the updated state if there is a transition;
+   *         otherwise, return null to indicate no state change.
+   */
+  public State transition(UnaryOperator<State> operator) {
+    for(;;) {
+      final State previous = current.get();
+      final State applied = operator.apply(previous);
+      if (previous == applied) {
+        return null; // no change required
+      }
+      State.validate(name, previous, applied);
+      if (current.compareAndSet(previous, applied)) {
+        return applied;
+      }
+      // state has been changed, retry
+    }
+  }
+
+  /**
+   * Transition using the given operator.
+   *
+   * @return the updated state.
+   */
+  public State transitionAndGet(UnaryOperator<State> operator) {
+    return current.updateAndGet(previous -> {
+      final State applied = operator.apply(previous);
+      if (applied != previous) {
+        State.validate(name, previous, applied);
+      }
+      return applied;
+    });
   }
 
   /**

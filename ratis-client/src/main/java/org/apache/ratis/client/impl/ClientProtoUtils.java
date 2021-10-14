@@ -17,9 +17,23 @@
  */
 package org.apache.ratis.client.impl;
 
+import java.nio.ByteBuffer;
 import java.util.Optional;
+
+import org.apache.ratis.datastream.impl.DataStreamReplyByteBuffer;
 import org.apache.ratis.protocol.*;
+import org.apache.ratis.protocol.exceptions.AlreadyClosedException;
+import org.apache.ratis.protocol.exceptions.DataStreamException;
+import org.apache.ratis.protocol.exceptions.LeaderNotReadyException;
+import org.apache.ratis.protocol.exceptions.LeaderSteppingDownException;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
+import org.apache.ratis.protocol.exceptions.NotReplicatedException;
+import org.apache.ratis.protocol.exceptions.RaftException;
+import org.apache.ratis.protocol.exceptions.StateMachineException;
+import org.apache.ratis.protocol.exceptions.TransferLeadershipException;
+import org.apache.ratis.rpc.CallId;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
+import org.apache.ratis.thirdparty.com.google.protobuf.InvalidProtocolBufferException;
 import org.apache.ratis.proto.RaftProtos.*;
 import org.apache.ratis.util.ProtoUtils;
 import org.apache.ratis.util.ReflectionUtils;
@@ -28,43 +42,62 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.apache.ratis.proto.RaftProtos.RaftClientReplyProto.ExceptionDetailsCase.ALREADYCLOSEDEXCEPTION;
+import static org.apache.ratis.proto.RaftProtos.RaftClientReplyProto.ExceptionDetailsCase.DATASTREAMEXCEPTION;
 import static org.apache.ratis.proto.RaftProtos.RaftClientReplyProto.ExceptionDetailsCase.LEADERNOTREADYEXCEPTION;
+import static org.apache.ratis.proto.RaftProtos.RaftClientReplyProto.ExceptionDetailsCase.LEADERSTEPPINGDOWNEXCEPTION;
 import static org.apache.ratis.proto.RaftProtos.RaftClientReplyProto.ExceptionDetailsCase.NOTLEADEREXCEPTION;
 import static org.apache.ratis.proto.RaftProtos.RaftClientReplyProto.ExceptionDetailsCase.NOTREPLICATEDEXCEPTION;
 import static org.apache.ratis.proto.RaftProtos.RaftClientReplyProto.ExceptionDetailsCase.STATEMACHINEEXCEPTION;
+import static org.apache.ratis.proto.RaftProtos.RaftClientReplyProto.ExceptionDetailsCase.TRANSFERLEADERSHIPEXCEPTION;
 
 public interface ClientProtoUtils {
 
   static RaftRpcReplyProto.Builder toRaftRpcReplyProtoBuilder(
-      ByteString requestorId, ByteString replyId, RaftGroupId groupId,
-      long callId, boolean success) {
+      ByteString requestorId, ByteString replyId, RaftGroupId groupId, Long callId, boolean success) {
     return RaftRpcReplyProto.newBuilder()
         .setRequestorId(requestorId)
         .setReplyId(replyId)
         .setRaftGroupId(ProtoUtils.toRaftGroupIdProtoBuilder(groupId))
-        .setCallId(callId)
+        .setCallId(Optional.ofNullable(callId).orElseGet(CallId::getDefault))
         .setSuccess(success);
   }
 
+  static RaftRpcRequestProto.Builder toRaftRpcRequestProtoBuilder(RaftGroupMemberId requestorId, RaftPeerId replyId) {
+    return toRaftRpcRequestProtoBuilder(requestorId.getPeerId().toByteString(),
+        replyId.toByteString(), requestorId.getGroupId(), null, false, null, null, 0);
+  }
+
+  @SuppressWarnings("parameternumber")
   static RaftRpcRequestProto.Builder toRaftRpcRequestProtoBuilder(
-      ByteString requesterId, ByteString replyId, RaftGroupId groupId, long callId,
-      SlidingWindowEntry slidingWindowEntry) {
+      ByteString requesterId, ByteString replyId, RaftGroupId groupId, Long callId, boolean toLeader,
+      SlidingWindowEntry slidingWindowEntry, RoutingTable routingTable, long timeoutMs) {
     if (slidingWindowEntry == null) {
       slidingWindowEntry = SlidingWindowEntry.getDefaultInstance();
     }
-    return RaftRpcRequestProto.newBuilder()
+
+    RaftRpcRequestProto.Builder b = RaftRpcRequestProto.newBuilder()
         .setRequestorId(requesterId)
         .setReplyId(replyId)
         .setRaftGroupId(ProtoUtils.toRaftGroupIdProtoBuilder(groupId))
-        .setCallId(callId)
-        .setSlidingWindowEntry(slidingWindowEntry);
+        .setCallId(Optional.ofNullable(callId).orElseGet(CallId::getDefault))
+        .setToLeader(toLeader)
+        .setSlidingWindowEntry(slidingWindowEntry)
+        .setTimeoutMs(timeoutMs);
+
+    if (routingTable != null) {
+      b.setRoutingTable(routingTable.toProto());
+    }
+
+    return b;
   }
 
+  @SuppressWarnings("parameternumber")
   static RaftRpcRequestProto.Builder toRaftRpcRequestProtoBuilder(
-      ClientId requesterId, RaftPeerId replyId, RaftGroupId groupId, long callId,
-      SlidingWindowEntry slidingWindowEntry) {
+      ClientId requesterId, RaftPeerId replyId, RaftGroupId groupId, long callId, boolean toLeader,
+      SlidingWindowEntry slidingWindowEntry, RoutingTable routingTable, long timeoutMs) {
     return toRaftRpcRequestProtoBuilder(
-        requesterId.toByteString(), replyId.toByteString(), groupId, callId, slidingWindowEntry);
+        requesterId.toByteString(), replyId.toByteString(), groupId, callId, toLeader, slidingWindowEntry, routingTable,
+        timeoutMs);
   }
 
   static RaftRpcRequestProto.Builder toRaftRpcRequestProtoBuilder(
@@ -74,15 +107,22 @@ public interface ClientProtoUtils {
         request.getServerId(),
         request.getRaftGroupId(),
         request.getCallId(),
-        request.getSlidingWindowEntry());
+        request.isToLeader(),
+        request.getSlidingWindowEntry(),
+        request.getRoutingTable(),
+        request.getTimeoutMs());
   }
 
   static RaftClientRequest.Type toRaftClientRequestType(RaftClientRequestProto p) {
     switch (p.getTypeCase()) {
       case WRITE:
         return RaftClientRequest.Type.valueOf(p.getWrite());
-      case STREAM:
-        return RaftClientRequest.Type.valueOf(p.getStream());
+      case DATASTREAM:
+        return RaftClientRequest.Type.valueOf(p.getDataStream());
+      case FORWARD:
+        return RaftClientRequest.Type.valueOf(p.getForward());
+      case MESSAGESTREAM:
+        return RaftClientRequest.Type.valueOf(p.getMessageStream());
       case READ:
         return RaftClientRequest.Type.valueOf(p.getRead());
       case STALEREAD:
@@ -95,21 +135,50 @@ public interface ClientProtoUtils {
     }
   }
 
+  static RoutingTable getRoutingTable(RaftRpcRequestProto p) {
+    if (!p.hasRoutingTable()) {
+      return null;
+    }
+
+    RoutingTable.Builder builder = RoutingTable.newBuilder();
+    for (RouteProto routeProto : p.getRoutingTable().getRoutesList()) {
+      RaftPeerId from = RaftPeerId.valueOf(routeProto.getPeerId().getId());
+      List<RaftPeerId> to = routeProto.getSuccessorsList().stream()
+          .map(v -> RaftPeerId.valueOf(v.getId())).collect(Collectors.toList());
+      builder.addSuccessors(from, to);
+    }
+
+    return builder.build();
+  }
+
   static RaftClientRequest toRaftClientRequest(RaftClientRequestProto p) {
     final RaftClientRequest.Type type = toRaftClientRequestType(p);
     final RaftRpcRequestProto request = p.getRpcRequest();
-    return new RaftClientRequest(
-        ClientId.valueOf(request.getRequestorId()),
-        RaftPeerId.valueOf(request.getReplyId()),
-        ProtoUtils.toRaftGroupId(request.getRaftGroupId()),
-        request.getCallId(),
-        toMessage(p.getMessage()),
-        type,
-        request.getSlidingWindowEntry());
+
+    final RaftClientRequest.Builder b = RaftClientRequest.newBuilder();
+
+    final RaftPeerId perrId = RaftPeerId.valueOf(request.getReplyId());
+    if (request.getToLeader()) {
+      b.setLeaderId(perrId);
+    } else {
+      b.setServerId(perrId);
+    }
+    return b.setClientId(ClientId.valueOf(request.getRequestorId()))
+        .setGroupId(ProtoUtils.toRaftGroupId(request.getRaftGroupId()))
+        .setCallId(request.getCallId())
+        .setMessage(toMessage(p.getMessage()))
+        .setType(type)
+        .setSlidingWindowEntry(request.getSlidingWindowEntry())
+        .setRoutingTable(getRoutingTable(request))
+        .setTimeoutMs(request.getTimeoutMs())
+        .build();
   }
 
-  static RaftClientRequestProto toRaftClientRequestProto(
-      RaftClientRequest request) {
+  static ByteBuffer toRaftClientRequestProtoByteBuffer(RaftClientRequest request) {
+    return toRaftClientRequestProto(request).toByteString().asReadOnlyByteBuffer();
+  }
+
+  static RaftClientRequestProto toRaftClientRequestProto(RaftClientRequest request) {
     final RaftClientRequestProto.Builder b = RaftClientRequestProto.newBuilder()
         .setRpcRequest(toRaftRpcRequestProtoBuilder(request));
     if (request.getMessage() != null) {
@@ -121,8 +190,14 @@ public interface ClientProtoUtils {
       case WRITE:
         b.setWrite(type.getWrite());
         break;
-      case STREAM:
-        b.setStream(type.getStream());
+      case DATASTREAM:
+        b.setDataStream(type.getDataStream());
+        break;
+      case FORWARD:
+        b.setForward(type.getForward());
+        break;
+      case MESSAGESTREAM:
+        b.setMessageStream(type.getMessageStream());
         break;
       case READ:
         b.setRead(type.getRead());
@@ -146,10 +221,26 @@ public interface ClientProtoUtils {
       long seqNum, ByteString content) {
     return RaftClientRequestProto.newBuilder()
         .setRpcRequest(toRaftRpcRequestProtoBuilder(
-            clientId, serverId, groupId, callId, ProtoUtils.toSlidingWindowEntry(seqNum, false)))
+            clientId, serverId, groupId, callId, false, ProtoUtils.toSlidingWindowEntry(seqNum, false), null, 0))
         .setWrite(WriteRequestTypeProto.getDefaultInstance())
         .setMessage(toClientMessageEntryProtoBuilder(content))
         .build();
+  }
+
+  static StateMachineExceptionProto.Builder toStateMachineExceptionProtoBuilder(StateMachineException e) {
+    final Throwable t = e.getCause() != null? e.getCause(): e;
+    return StateMachineExceptionProto.newBuilder()
+        .setExceptionClassName(t.getClass().getName())
+        .setErrorMsg(t.getMessage())
+        .setStacktrace(ProtoUtils.writeObject2ByteString(t.getStackTrace()));
+  }
+
+  static AlreadyClosedExceptionProto.Builder toAlreadyClosedExceptionProtoBuilder(AlreadyClosedException ace) {
+    final Throwable t = ace.getCause() != null ? ace.getCause() : ace;
+    return AlreadyClosedExceptionProto.newBuilder()
+        .setExceptionClassName(t.getClass().getName())
+        .setErrorMsg(ace.getMessage())
+        .setStacktrace(ProtoUtils.writeObject2ByteString(ace.getStackTrace()));
   }
 
   static RaftClientReplyProto toRaftClientReplyProto(RaftClientReply reply) {
@@ -165,7 +256,6 @@ public interface ClientProtoUtils {
       ProtoUtils.addCommitInfos(reply.getCommitInfos(), b::addCommitInfos);
 
       final NotLeaderException nle = reply.getNotLeaderException();
-      final StateMachineException sme;
       if (nle != null) {
         NotLeaderExceptionProto.Builder nleBuilder =
             NotLeaderExceptionProto.newBuilder();
@@ -175,14 +265,6 @@ public interface ClientProtoUtils {
         }
         nleBuilder.addAllPeersInConf(ProtoUtils.toRaftPeerProtos(nle.getPeers()));
         b.setNotLeaderException(nleBuilder.build());
-      } else if ((sme = reply.getStateMachineException()) != null) {
-        StateMachineExceptionProto.Builder smeBuilder =
-            StateMachineExceptionProto.newBuilder();
-        final Throwable t = sme.getCause() != null ? sme.getCause() : sme;
-        smeBuilder.setExceptionClassName(t.getClass().getName())
-            .setErrorMsg(t.getMessage())
-            .setStacktrace(ProtoUtils.writeObject2ByteString(t.getStackTrace()));
-        b.setStateMachineException(smeBuilder.build());
       }
 
       final NotReplicatedException nre = reply.getNotReplicatedException();
@@ -201,15 +283,25 @@ public interface ClientProtoUtils {
         b.setLeaderNotReadyException(lnreBuilder);
       }
 
-      final AlreadyClosedException ace = reply.getAlreadyClosedException();
-      if (ace != null) {
-        final Throwable t = ace.getCause() != null ? ace.getCause() : ace;
-        AlreadyClosedExceptionProto.Builder aceBuilder = AlreadyClosedExceptionProto.newBuilder()
-            .setExceptionClassName(t.getClass().getName())
-            .setErrorMsg(ace.getMessage())
-            .setStacktrace(ProtoUtils.writeObject2ByteString(ace.getStackTrace()));
-        b.setAlreadyClosedException(aceBuilder);
-      }
+      Optional.ofNullable(reply.getStateMachineException())
+          .map(ClientProtoUtils::toStateMachineExceptionProtoBuilder)
+          .ifPresent(b::setStateMachineException);
+
+      Optional.ofNullable(reply.getDataStreamException())
+          .map(ProtoUtils::toThrowableProto)
+          .ifPresent(b::setDataStreamException);
+
+      Optional.ofNullable(reply.getAlreadyClosedException())
+          .map(ClientProtoUtils::toAlreadyClosedExceptionProtoBuilder)
+          .ifPresent(b::setAlreadyClosedException);
+
+      Optional.ofNullable(reply.getLeaderSteppingDownException())
+          .map(ProtoUtils::toThrowableProto)
+          .ifPresent(b::setLeaderSteppingDownException);
+
+      Optional.ofNullable(reply.getTransferLeadershipException())
+          .map(ProtoUtils::toThrowableProto)
+          .ifPresent(b::setTransferLeadershipException);
 
       final RaftClientReplyProto serialized = b.build();
       final RaftException e = reply.getException();
@@ -258,6 +350,21 @@ public interface ClientProtoUtils {
     return b.build();
   }
 
+  static RaftClientReply getRaftClientReply(DataStreamReply reply) {
+    if (!(reply instanceof DataStreamReplyByteBuffer)) {
+      throw new IllegalStateException("Unexpected " + reply.getClass() + ": reply is " + reply);
+    }
+    try {
+      return toRaftClientReply(((DataStreamReplyByteBuffer) reply).slice());
+    } catch (InvalidProtocolBufferException e) {
+      throw new IllegalStateException("Failed to getRaftClientReply from " + reply, e);
+    }
+  }
+
+  static RaftClientReply toRaftClientReply(ByteBuffer buffer) throws InvalidProtocolBufferException {
+    return toRaftClientReply(RaftClientReplyProto.parseFrom(buffer));
+  }
+
   static RaftClientReply toRaftClientReply(RaftClientReplyProto replyProto) {
     final RaftRpcReplyProto rp = replyProto.getRpcReply();
     final RaftGroupMemberId serverMemberId = ProtoUtils.toRaftGroupMemberId(rp.getReplyId(), rp.getRaftGroupId());
@@ -273,72 +380,68 @@ public interface ClientProtoUtils {
       final NotReplicatedExceptionProto nre = replyProto.getNotReplicatedException();
       e = new NotReplicatedException(nre.getCallId(), nre.getReplication(), nre.getLogIndex());
     } else if (replyProto.getExceptionDetailsCase().equals(STATEMACHINEEXCEPTION)) {
-      StateMachineExceptionProto smeProto = replyProto.getStateMachineException();
-      e = wrapStateMachineException(serverMemberId,
-          smeProto.getExceptionClassName(), smeProto.getErrorMsg(), smeProto.getStacktrace());
+      e = toStateMachineException(serverMemberId, replyProto.getStateMachineException());
+    } else if (replyProto.getExceptionDetailsCase().equals(DATASTREAMEXCEPTION)) {
+      e = ProtoUtils.toThrowable(replyProto.getDataStreamException(), DataStreamException.class);
     } else if (replyProto.getExceptionDetailsCase().equals(LEADERNOTREADYEXCEPTION)) {
       LeaderNotReadyExceptionProto lnreProto = replyProto.getLeaderNotReadyException();
       e = new LeaderNotReadyException(ProtoUtils.toRaftGroupMemberId(lnreProto.getServerId()));
     } else if (replyProto.getExceptionDetailsCase().equals(ALREADYCLOSEDEXCEPTION)) {
-      AlreadyClosedExceptionProto aceProto = replyProto.getAlreadyClosedException();
-      e = wrapAlreadyClosedException(aceProto.getExceptionClassName(),
-          aceProto.getErrorMsg(), aceProto.getStacktrace());
+      e = toAlreadyClosedException(replyProto.getAlreadyClosedException());
+    } else if (replyProto.getExceptionDetailsCase().equals(LEADERSTEPPINGDOWNEXCEPTION)) {
+      e = ProtoUtils.toThrowable(replyProto.getLeaderSteppingDownException(), LeaderSteppingDownException.class);
+    } else if (replyProto.getExceptionDetailsCase().equals(TRANSFERLEADERSHIPEXCEPTION)) {
+      e = ProtoUtils.toThrowable(replyProto.getTransferLeadershipException(), TransferLeadershipException.class);
     } else {
       e = null;
     }
-    ClientId clientId = ClientId.valueOf(rp.getRequestorId());
-    return new RaftClientReply(clientId, serverMemberId, rp.getCallId(), rp.getSuccess(),
-        toMessage(replyProto.getMessage()), e,
-        replyProto.getLogIndex(), replyProto.getCommitInfosList());
+
+    return RaftClientReply.newBuilder()
+        .setClientId(ClientId.valueOf(rp.getRequestorId()))
+        .setServerId(serverMemberId)
+        .setCallId(rp.getCallId())
+        .setSuccess(rp.getSuccess())
+        .setMessage(toMessage(replyProto.getMessage()))
+        .setException(e)
+        .setLogIndex(replyProto.getLogIndex())
+        .setCommitInfos(replyProto.getCommitInfosList())
+        .build();
   }
 
-  static GroupListReply toGroupListReply(
-      GroupListReplyProto replyProto) {
-    final RaftRpcReplyProto rp = replyProto.getRpcReply();
-    ClientId clientId = ClientId.valueOf(rp.getRequestorId());
-    final RaftGroupId groupId = ProtoUtils.toRaftGroupId(rp.getRaftGroupId());
-    final List<RaftGroupId> groupInfos = replyProto.getGroupIdList().stream()
-        .map(ProtoUtils::toRaftGroupId)
-        .collect(Collectors.toList());
-    return new GroupListReply(clientId, RaftPeerId.valueOf(rp.getReplyId()),
-        groupId, rp.getCallId(), rp.getSuccess(), groupInfos);
+  static StateMachineException toStateMachineException(RaftGroupMemberId memberId, StateMachineExceptionProto proto) {
+    return toStateMachineException(memberId,
+        proto.getExceptionClassName(),
+        proto.getErrorMsg(),
+        proto.getStacktrace());
   }
 
-  static GroupInfoReply toGroupInfoReply(
-      GroupInfoReplyProto replyProto) {
-    final RaftRpcReplyProto rp = replyProto.getRpcReply();
-    ClientId clientId = ClientId.valueOf(rp.getRequestorId());
-    final RaftGroupId groupId = ProtoUtils.toRaftGroupId(rp.getRaftGroupId());
-    final RaftGroup raftGroup = ProtoUtils.toRaftGroup(replyProto.getGroup());
-    RoleInfoProto role = replyProto.getRole();
-    boolean isRaftStorageHealthy = replyProto.getIsRaftStorageHealthy();
-    return new GroupInfoReply(clientId, RaftPeerId.valueOf(rp.getReplyId()),
-        groupId, rp.getCallId(), rp.getSuccess(), role, isRaftStorageHealthy,
-        replyProto.getCommitInfosList(), raftGroup);
-  }
-
-  static StateMachineException wrapStateMachineException(
-      RaftGroupMemberId memberId, String className, String errorMsg, ByteString stackTraceBytes) {
+  static StateMachineException toStateMachineException(RaftGroupMemberId memberId,
+      String className, String errorMsg, ByteString stackTraceBytes) {
     StateMachineException sme;
     if (className == null) {
       sme = new StateMachineException(errorMsg);
     } else {
       try {
-        Class<?> clazz = Class.forName(className);
-        final Exception e = ReflectionUtils.instantiateException(
-            clazz.asSubclass(Exception.class), errorMsg, null);
+        final Class<?> clazz = Class.forName(className);
+        final Exception e = ReflectionUtils.instantiateException(clazz.asSubclass(Exception.class), errorMsg);
         sme = new StateMachineException(memberId, e);
       } catch (Exception e) {
         sme = new StateMachineException(className + ": " + errorMsg);
       }
     }
-    StackTraceElement[] stacktrace =
-        (StackTraceElement[]) ProtoUtils.toObject(stackTraceBytes);
+    final StackTraceElement[] stacktrace = (StackTraceElement[]) ProtoUtils.toObject(stackTraceBytes);
     sme.setStackTrace(stacktrace);
     return sme;
   }
 
-  static AlreadyClosedException wrapAlreadyClosedException(
+  static AlreadyClosedException toAlreadyClosedException(AlreadyClosedExceptionProto proto) {
+    return toAlreadyClosedException(
+        proto.getExceptionClassName(),
+        proto.getErrorMsg(),
+        proto.getStacktrace());
+  }
+
+  static AlreadyClosedException toAlreadyClosedException(
       String className, String errorMsg, ByteString stackTraceBytes) {
     AlreadyClosedException ace;
     if (className == null) {
@@ -346,8 +449,7 @@ public interface ClientProtoUtils {
     } else {
       try {
         Class<?> clazz = Class.forName(className);
-        final Exception e = ReflectionUtils.instantiateException(
-            clazz.asSubclass(Exception.class), errorMsg, null);
+        final Exception e = ReflectionUtils.instantiateException(clazz.asSubclass(Exception.class), errorMsg);
         ace = new AlreadyClosedException(errorMsg, e);
       } catch (Exception e) {
         ace = new AlreadyClosedException(className + ": " + errorMsg);
@@ -357,6 +459,30 @@ public interface ClientProtoUtils {
         (StackTraceElement[]) ProtoUtils.toObject(stackTraceBytes);
     ace.setStackTrace(stacktrace);
     return ace;
+  }
+
+  static GroupListReply toGroupListReply(GroupListReplyProto replyProto) {
+    final RaftRpcReplyProto rpc = replyProto.getRpcReply();
+    final List<RaftGroupId> groupIds = replyProto.getGroupIdList().stream()
+        .map(ProtoUtils::toRaftGroupId)
+        .collect(Collectors.toList());
+    return new GroupListReply(ClientId.valueOf(rpc.getRequestorId()),
+        RaftPeerId.valueOf(rpc.getReplyId()),
+        ProtoUtils.toRaftGroupId(rpc.getRaftGroupId()),
+        rpc.getCallId(),
+        groupIds);
+  }
+
+  static GroupInfoReply toGroupInfoReply(GroupInfoReplyProto replyProto) {
+    final RaftRpcReplyProto rpc = replyProto.getRpcReply();
+    return new GroupInfoReply(ClientId.valueOf(rpc.getRequestorId()),
+        RaftPeerId.valueOf(rpc.getReplyId()),
+        ProtoUtils.toRaftGroupId(rpc.getRaftGroupId()),
+        rpc.getCallId(),
+        replyProto.getCommitInfosList(),
+        ProtoUtils.toRaftGroup(replyProto.getGroup()),
+        replyProto.getRole(),
+        replyProto.getIsRaftStorageHealthy());
   }
 
   static Message toMessage(final ClientMessageEntryProto p) {
@@ -390,6 +516,27 @@ public interface ClientProtoUtils {
         .build();
   }
 
+  static TransferLeadershipRequest toTransferLeadershipRequest(
+      TransferLeadershipRequestProto p) {
+    final RaftRpcRequestProto m = p.getRpcRequest();
+    final RaftPeer newLeader = ProtoUtils.toRaftPeer(p.getNewLeader());
+    return new TransferLeadershipRequest(
+        ClientId.valueOf(m.getRequestorId()),
+        RaftPeerId.valueOf(m.getReplyId()),
+        ProtoUtils.toRaftGroupId(m.getRaftGroupId()),
+        p.getRpcRequest().getCallId(),
+        newLeader.getId(),
+        m.getTimeoutMs());
+  }
+
+  static TransferLeadershipRequestProto toTransferLeadershipRequestProto(
+      TransferLeadershipRequest request) {
+    return TransferLeadershipRequestProto.newBuilder()
+        .setRpcRequest(toRaftRpcRequestProtoBuilder(request))
+        .setNewLeader(RaftPeer.newBuilder().setId(request.getNewLeader()).build().getRaftPeerProto())
+        .build();
+  }
+
   static GroupManagementRequest toGroupManagementRequest(GroupManagementRequestProto p) {
     final RaftRpcRequestProto m = p.getRpcRequest();
     final ClientId clientId = ClientId.valueOf(m.getRequestorId());
@@ -401,7 +548,8 @@ public interface ClientProtoUtils {
       case GROUPREMOVE:
         final GroupRemoveRequestProto remove = p.getGroupRemove();
         return GroupManagementRequest.newRemove(clientId, serverId, m.getCallId(),
-            ProtoUtils.toRaftGroupId(remove.getGroupId()), remove.getDeleteDirectory());
+            ProtoUtils.toRaftGroupId(remove.getGroupId()),
+            remove.getDeleteDirectory(), remove.getRenameDirectory());
       default:
         throw new IllegalArgumentException("Unexpected op " + p.getOpCase() + " in " + p);
     }
@@ -441,6 +589,7 @@ public interface ClientProtoUtils {
       b.setGroupRemove(GroupRemoveRequestProto.newBuilder()
           .setGroupId(ProtoUtils.toRaftGroupIdProtoBuilder(remove.getGroupId()))
           .setDeleteDirectory(remove.isDeleteDirectory())
+          .setRenameDirectory(remove.isRenameDirectory())
           .build());
     }
     return b.build();

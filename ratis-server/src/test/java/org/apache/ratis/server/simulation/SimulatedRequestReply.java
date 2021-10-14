@@ -120,6 +120,7 @@ class SimulatedRequestReply<REQUEST extends RaftRpcMessage, REPLY extends RaftRp
       RaftTestUtil.block(q.blockSendRequestTo::get);
       return q.request(request);
     } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
       throw IOUtils.toInterruptedIOException("", e);
     }
   }
@@ -130,21 +131,26 @@ class SimulatedRequestReply<REQUEST extends RaftRpcMessage, REPLY extends RaftRp
       throw new IOException("The RPC of " + qid + " has already shutdown.");
     }
 
-    final REQUEST request;
+    REQUEST request;
     try {
       // delay request for testing
-      RaftTestUtil.delay(q.delayTakeRequestTo::get);
+      while (true) {
+        request = q.takeRequest();
+        Preconditions.assertTrue(qid.equals(request.getReplierId()));
 
-      request = q.takeRequest();
-      Preconditions.assertTrue(qid.equals(request.getReplierId()));
-
-      // block request for testing
-      final EventQueue<REQUEST, REPLY> reqQ = queues.get(request.getRequestorId());
-      if (reqQ != null) {
-        RaftTestUtil.delay(reqQ.delayTakeRequestFrom::get);
-        RaftTestUtil.block(reqQ.blockTakeRequestFrom::get);
+        final EventQueue<REQUEST, REPLY> reqQ = queues.get(request.getRequestorId());
+        if (reqQ != null) {
+          // Doing a busy wait here until got request from requestor which was not blocked.
+          if (reqQ.blockTakeRequestFrom.get()) {
+            continue;
+          }
+          RaftTestUtil.delay(reqQ.delayTakeRequestFrom::get);
+        }
+        break;
       }
+      RaftTestUtil.delay(q.delayTakeRequestTo::get);
     } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
       throw IOUtils.toInterruptedIOException("", e);
     }
     return request;
@@ -187,6 +193,7 @@ class SimulatedRequestReply<REQUEST extends RaftRpcMessage, REPLY extends RaftRp
       try {
         Thread.sleep(randomSleepMs);
       } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
         throw IOUtils.toInterruptedIOException("", ie);
       }
     }

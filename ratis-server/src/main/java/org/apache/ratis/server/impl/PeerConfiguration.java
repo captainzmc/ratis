@@ -90,11 +90,18 @@ class PeerConfiguration {
       if (contains(other)) {
         num++;
       }
-      if (num > size() / 2) {
-        return true;
+    }
+    return num > size() / 2;
+  }
+
+  boolean majorityRejectVotes(Collection<RaftPeerId> rejected) {
+    int num = size();
+    for (RaftPeerId other : rejected) {
+      if (contains(other)) {
+        num --;
       }
     }
-    return false;
+    return num <= size() / 2;
   }
 
   @Override

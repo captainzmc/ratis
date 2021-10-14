@@ -26,8 +26,7 @@ import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.apache.ratis.rpc.SupportedRpcType;
 import org.apache.ratis.server.RaftServer;
-import org.apache.ratis.server.RaftServerRpc;
-import org.apache.ratis.server.impl.RaftServerRpcWithProxy;
+import org.apache.ratis.server.RaftServerRpcWithProxy;
 import org.apache.ratis.thirdparty.io.netty.bootstrap.ServerBootstrap;
 import org.apache.ratis.thirdparty.io.netty.channel.*;
 import org.apache.ratis.thirdparty.io.netty.channel.nio.NioEventLoopGroup;
@@ -44,6 +43,7 @@ import org.apache.ratis.proto.netty.NettyProtos.RaftNettyExceptionReplyProto;
 import org.apache.ratis.proto.netty.NettyProtos.RaftNettyServerReplyProto;
 import org.apache.ratis.proto.netty.NettyProtos.RaftNettyServerRequestProto;
 import org.apache.ratis.util.CodeInjectionForTesting;
+import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.ProtoUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,20 +58,21 @@ import java.util.Objects;
  */
 public final class NettyRpcService extends RaftServerRpcWithProxy<NettyRpcProxy, NettyRpcProxy.PeerMap> {
   public static final Logger LOG = LoggerFactory.getLogger(NettyRpcService.class);
-  static final String CLASS_NAME = NettyRpcService.class.getSimpleName();
+  static final String CLASS_NAME = JavaUtils.getClassSimpleName(NettyRpcService.class);
   public static final String SEND_SERVER_REQUEST = CLASS_NAME + ".sendServerRequest";
 
-  public static final class Builder extends RaftServerRpc.Builder<Builder, NettyRpcService> {
+  public static final class Builder {
+    private RaftServer server;
+
     private Builder() {}
 
-    @Override
-    public Builder getThis() {
+    public Builder setServer(RaftServer raftServer) {
+      this.server = raftServer;
       return this;
     }
 
-    @Override
     public NettyRpcService build() {
-      return new NettyRpcService(getServer());
+      return new NettyRpcService(server);
     }
   }
 
@@ -102,7 +103,7 @@ public final class NettyRpcService extends RaftServerRpcWithProxy<NettyRpcProxy,
     final ChannelInitializer<SocketChannel> initializer
         = new ChannelInitializer<SocketChannel>() {
       @Override
-      protected void initChannel(SocketChannel ch) throws Exception {
+      protected void initChannel(SocketChannel ch) {
         final ChannelPipeline p = ch.pipeline();
 
         p.addLast(new ProtobufVarint32FrameDecoder());
@@ -136,8 +137,8 @@ public final class NettyRpcService extends RaftServerRpcWithProxy<NettyRpcProxy,
   public void startImpl() throws IOException {
     try {
       channelFuture.syncUninterruptibly();
-    } catch(Throwable t) {
-      throw new IOException(getId() + ": Failed to start " + getClass().getSimpleName(), t);
+    } catch(Exception t) {
+      throw new IOException(getId() + ": Failed to start " + JavaUtils.getClassSimpleName(getClass()), t);
     }
   }
 
@@ -152,6 +153,7 @@ public final class NettyRpcService extends RaftServerRpcWithProxy<NettyRpcProxy,
       workerGroup.awaitTermination(1000, TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
       LOG.error("Interrupt EventLoopGroup terminate", e);
+      Thread.currentThread().interrupt();
     }
     super.closeImpl();
   }
@@ -172,6 +174,22 @@ public final class NettyRpcService extends RaftServerRpcWithProxy<NettyRpcProxy,
           return RaftNettyServerReplyProto.newBuilder()
               .setRequestVoteReply(reply)
               .build();
+
+        case TRANSFERLEADERSHIPREQUEST:
+          final TransferLeadershipRequestProto transferLeadershipRequest = proto.getTransferLeadershipRequest();
+          rpcRequest = transferLeadershipRequest.getRpcRequest();
+          final RaftClientReply transferLeadershipReply = server.transferLeadership(
+              ClientProtoUtils.toTransferLeadershipRequest(transferLeadershipRequest));
+          return RaftNettyServerReplyProto.newBuilder()
+              .setRaftClientReply(ClientProtoUtils.toRaftClientReplyProto(transferLeadershipReply))
+              .build();
+
+        case STARTLEADERELECTIONREQUEST:
+          final StartLeaderElectionRequestProto startLeaderElectionRequest = proto.getStartLeaderElectionRequest();
+          rpcRequest = startLeaderElectionRequest.getServerRequest();
+          final StartLeaderElectionReplyProto startLeaderElectionReply =
+              server.startLeaderElection(startLeaderElectionRequest);
+          return RaftNettyServerReplyProto.newBuilder().setStartLeaderElectionReply(startLeaderElectionReply).build();
 
         case APPENDENTRIESREQUEST:
           final AppendEntriesRequestProto appendEntriesRequest = proto.getAppendEntriesRequest();
@@ -269,6 +287,18 @@ public final class NettyRpcService extends RaftServerRpcWithProxy<NettyRpcProxy,
         .build();
     final RaftRpcRequestProto serverRequest = request.getServerRequest();
     return sendRaftNettyServerRequestProto(serverRequest, proto).getRequestVoteReply();
+  }
+
+
+  @Override
+  public StartLeaderElectionReplyProto startLeaderElection(StartLeaderElectionRequestProto request) throws IOException {
+    CodeInjectionForTesting.execute(SEND_SERVER_REQUEST, getId(), null, request);
+
+    final RaftNettyServerRequestProto proto = RaftNettyServerRequestProto.newBuilder()
+        .setStartLeaderElectionRequest(request)
+        .build();
+    final RaftRpcRequestProto serverRequest = request.getServerRequest();
+    return sendRaftNettyServerRequestProto(serverRequest, proto).getStartLeaderElectionReply();
   }
 
   @Override

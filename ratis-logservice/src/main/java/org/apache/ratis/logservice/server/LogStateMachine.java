@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -50,17 +50,15 @@ import org.apache.ratis.logservice.api.LogName;
 import org.apache.ratis.logservice.common.Constants;
 import org.apache.ratis.logservice.impl.ArchiveHdfsLogReader;
 import org.apache.ratis.logservice.impl.ArchiveHdfsLogWriter;
-import org.apache.ratis.logservice.metrics.LogServiceMetricsRegistry;
+import org.apache.ratis.logservice.metrics.LogServiceMetrics;
 import org.apache.ratis.logservice.proto.LogServiceProtos;
 import org.apache.ratis.logservice.proto.LogServiceProtos.AppendLogEntryRequestProto;
 import org.apache.ratis.logservice.proto.LogServiceProtos.GetLogLengthRequestProto;
 import org.apache.ratis.logservice.proto.LogServiceProtos.GetLogSizeRequestProto;
-import org.apache.ratis.logservice.proto.LogServiceProtos.GetStateRequestProto;
 import org.apache.ratis.logservice.proto.LogServiceProtos.LogServiceRequestProto;
 import org.apache.ratis.logservice.proto.LogServiceProtos.ReadLogRequestProto;
 import org.apache.ratis.logservice.util.LogServiceProtoUtil;
 import org.apache.ratis.logservice.util.LogServiceUtils;
-import org.apache.ratis.metrics.RatisMetricRegistry;
 import org.apache.ratis.proto.RaftProtos;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
 import org.apache.ratis.protocol.ClientId;
@@ -70,9 +68,6 @@ import org.apache.ratis.protocol.RaftGroup;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.logservice.server.ArchivalInfo.ArchivalStatus;
-import org.apache.ratis.server.impl.RaftServerConstants;
-import org.apache.ratis.server.impl.RaftServerProxy;
-import org.apache.ratis.server.impl.ServerState;
 import org.apache.ratis.server.protocol.TermIndex;
 import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.server.storage.RaftStorage;
@@ -83,6 +78,7 @@ import org.apache.ratis.statemachine.impl.SimpleStateMachineStorage;
 import org.apache.ratis.statemachine.impl.SingleFileSnapshotInfo;
 import org.apache.ratis.thirdparty.com.google.protobuf.TextFormat;
 import org.apache.ratis.util.AutoCloseableLock;
+import org.apache.ratis.util.JavaUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -90,7 +86,7 @@ public class LogStateMachine extends BaseStateMachine {
   public static final Logger LOG = LoggerFactory.getLogger(LogStateMachine.class);
   public static final long DEFAULT_ARCHIVE_THRESHOLD_PER_FILE = 1000000;
   private final RaftProperties properties;
-  private RatisMetricRegistry metricRegistry;
+  private LogServiceMetrics logServiceMetrics;
   private Timer sizeRequestTimer;
   private Timer readNextQueryTimer;
   private Timer getStateTimer;
@@ -122,7 +118,7 @@ public class LogStateMachine extends BaseStateMachine {
   private RaftLog log;
 
 
-  private RaftServerProxy proxy ;
+  private RaftServer proxy;
   private ExecutorService executorService;
   private boolean isArchivalRequest;
   private ArchivalInfo archivalInfo;
@@ -148,7 +144,7 @@ public class LogStateMachine extends BaseStateMachine {
   void reset() {
     this.length = 0;
     this.dataRecordsSize = 0;
-    setLastAppliedTermIndex(TermIndex.newTermIndex(0, -1));
+    setLastAppliedTermIndex(TermIndex.valueOf(0, -1));
   }
 
   @Override
@@ -156,22 +152,22 @@ public class LogStateMachine extends BaseStateMachine {
       RaftStorage raftStorage) throws IOException {
     super.initialize(server, groupId, raftStorage);
     this.storage.init(raftStorage);
-    this.proxy = (RaftServerProxy) server;
+    this.proxy = server;
     //TODO: using groupId for metric now but better to tag it with LogName
-    this.metricRegistry = LogServiceMetricsRegistry
-        .createMetricRegistryForLogService(groupId.toString(), server.getId().toString());
-    this.readNextQueryTimer = metricRegistry.timer("readNextQueryTime");
-    this.startIndexTimer= metricRegistry.timer("startIndexTime");
-    this.sizeRequestTimer = metricRegistry.timer("sizeRequestTime");
-    this.getStateTimer = metricRegistry.timer("getStateTime");
-    this.lastIndexQueryTimer = metricRegistry.timer("lastIndexQueryTime");
-    this.lengthQueryTimer = metricRegistry.timer("lengthQueryTime");
-    this.syncRequesTimer = metricRegistry.timer("syncRequesTime");
-    this.appendRequestTimer = metricRegistry.timer("appendRequestTime");
-    this.getCloseLogTimer = metricRegistry.timer("getCloseLogTime");
+    this.logServiceMetrics = new LogServiceMetrics(groupId.toString(),
+        server.getId().toString());
+    this.readNextQueryTimer = logServiceMetrics.getTimer("readNextQueryTime");
+    this.startIndexTimer= logServiceMetrics.getTimer("startIndexTime");
+    this.sizeRequestTimer = logServiceMetrics.getTimer("sizeRequestTime");
+    this.getStateTimer = logServiceMetrics.getTimer("getStateTime");
+    this.lastIndexQueryTimer = logServiceMetrics.getTimer("lastIndexQueryTime");
+    this.lengthQueryTimer = logServiceMetrics.getTimer("lengthQueryTime");
+    this.syncRequesTimer = logServiceMetrics.getTimer("syncRequesTime");
+    this.appendRequestTimer = logServiceMetrics.getTimer("appendRequestTime");
+    this.getCloseLogTimer = logServiceMetrics.getTimer("getCloseLogTime");
     //archiving request time not the actual archiving time
-    this.archiveLogRequestTimer = metricRegistry.timer("archiveLogRequestTime");
-    this.archiveLogTimer = metricRegistry.timer("archiveLogTime");
+    this.archiveLogRequestTimer = logServiceMetrics.getTimer("archiveLogRequestTime");
+    this.archiveLogTimer = logServiceMetrics.getTimer("archiveLogTime");
     loadSnapshot(storage.getLatestSnapshot());
     executorService = Executors.newSingleThreadExecutor();
     this.archivalInfo =
@@ -182,8 +178,7 @@ public class LogStateMachine extends BaseStateMachine {
 
   private void checkInitialization() throws IOException {
     if (this.log == null) {
-      ServerState serverState = proxy.getImpl(getGroupId()).getState();
-      this.log = serverState.getLog();
+      this.log = proxy.getDivision(getGroupId()).getRaftLog();
     }
   }
 
@@ -224,12 +219,12 @@ public class LogStateMachine extends BaseStateMachine {
   private long load(SingleFileSnapshotInfo snapshot, boolean reload) throws IOException {
     if (snapshot == null) {
       LOG.warn("The snapshot info is null.");
-      return RaftServerConstants.INVALID_LOG_INDEX;
+      return RaftLog.INVALID_LOG_INDEX;
     }
     final File snapshotFile = snapshot.getFile().getPath().toFile();
     if (!snapshotFile.exists()) {
       LOG.warn("The snapshot file {} does not exist for snapshot {}", snapshotFile, snapshot);
-      return RaftServerConstants.INVALID_LOG_INDEX;
+      return RaftLog.INVALID_LOG_INDEX;
     }
 
     final TermIndex last = SimpleStateMachineStorage.getTermIndexFromSnapshotFile(snapshotFile);
@@ -289,7 +284,7 @@ public class LogStateMachine extends BaseStateMachine {
         case GETSTATE:
           return recordTime(getStateTimer, new Task(){
             @Override public CompletableFuture<Message> run() {
-              return processGetStateRequest(logServiceRequestProto);
+              return processGetStateRequest();
             }
           });
         case LASTINDEXQUERY:
@@ -310,7 +305,7 @@ public class LogStateMachine extends BaseStateMachine {
             return processArchiveLog(logServiceRequestProto);
           }});
       case EXPORTINFO:
-        return processExportInfo(logServiceRequestProto);
+        return processExportInfo();
       default:
           // TODO
           throw new RuntimeException(
@@ -324,15 +319,11 @@ public class LogStateMachine extends BaseStateMachine {
 
   }
 
-  private CompletableFuture<Message> processExportInfo(
-      LogServiceRequestProto logServiceRequestProto) {
-    LogServiceProtos.GetExportInfoRequestProto exportInfoRequestProto =
-        logServiceRequestProto.getExportInfo();
+  private CompletableFuture<Message> processExportInfo() {
     LogServiceProtos.GetExportInfoReplyProto.Builder exportBuilder =
         LogServiceProtos.GetExportInfoReplyProto.newBuilder();
-    exportMap.values().stream().map(
-        archInfo -> exportBuilder.addInfo(LogServiceProtoUtil.toExportInfoProto(archInfo)))
-            .collect(Collectors.toList());
+    exportMap.values().forEach(
+        archInfo -> exportBuilder.addInfo(LogServiceProtoUtil.toExportInfoProto(archInfo)));
 
     return CompletableFuture.completedFuture(Message.valueOf(exportBuilder.build().toByteString()));
   }
@@ -485,6 +476,14 @@ public class LogStateMachine extends BaseStateMachine {
   @Override
   public void close() {
     reset();
+    logServiceMetrics.unregister();
+    if (client != null) {
+      try {
+        client.close();
+      } catch (Exception ignored) {
+        LOG.warn("{} is ignored", JavaUtils.getClassSimpleName(ignored.getClass()), ignored);
+      }
+    }
   }
 
   @Override
@@ -564,9 +563,7 @@ public class LogStateMachine extends BaseStateMachine {
         .valueOf(LogServiceProtos.ChangeStateReplyProto.newBuilder().build().toByteString()));
   }
 
-  private CompletableFuture<Message> processGetStateRequest(
-      LogServiceRequestProto logServiceRequestProto) {
-    GetStateRequestProto getState = logServiceRequestProto.getGetState();
+  private CompletableFuture<Message> processGetStateRequest() {
     return CompletableFuture.completedFuture(Message
         .valueOf(LogServiceProtoUtil.toGetStateReplyProto(state).toByteString()));
   }
@@ -616,12 +613,15 @@ public class LogStateMachine extends BaseStateMachine {
         loc = archiveLog.getLocation();
         ArchivalInfo exportInfo =
             exportMap.putIfAbsent(loc, new ArchivalInfo(loc));
-        if (exportInfo != null && exportInfo.getLastArchivedIndex() == archiveLog
-            .getLastArchivedRaftIndex()) {
-          throw new IllegalStateException("Export of " + logName + "for the given location " + loc
-              + "is already present and in " + exportInfo.getStatus());
+        if (exportInfo != null) {
+          if (exportInfo.getLastArchivedIndex() == archiveLog
+              .getLastArchivedRaftIndex()) {
+            throw new IllegalStateException("Export of " + logName + "for the given location " + loc
+                + "is already present and in " + exportInfo.getStatus());
+          } else {
+            exportInfo.updateArchivalInfo(archiveLog);
+          }
         }
-        exportInfo.updateArchivalInfo(archiveLog);
       }
       if (loc == null) {
         throw new IllegalArgumentException(isArchivalRequest ?
@@ -672,6 +672,7 @@ public class LogStateMachine extends BaseStateMachine {
                 // avoid causing problem during leader election storm
                 Thread.sleep(10000);
               } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
               }
               sendArchiveLogrequestToNewLeader(writer.getLastWrittenRecordId(), logName, location);
             }
@@ -712,7 +713,7 @@ public class LogStateMachine extends BaseStateMachine {
 
   private void sendArchiveLogrequestToNewLeader(long recordId, LogName logName, String location)
       throws IOException {
-    getClient().sendReadOnly(() -> LogServiceProtoUtil
+    getClient().io().sendReadOnly(() -> LogServiceProtoUtil
         .toArchiveLogRequestProto(logName, location, recordId, isArchivalRequest,
             ArchivalStatus.INTERRUPTED).toByteString());
   }
@@ -734,7 +735,7 @@ public class LogStateMachine extends BaseStateMachine {
   private void updateArchivingInfo(long recordId, LogName logName, String location,
       boolean isArchival, ArchivalStatus status)
       throws IOException {
-    RaftClientReply archiveLogReply = getClient().send(() -> LogServiceProtoUtil
+    RaftClientReply archiveLogReply = getClient().io().send(() -> LogServiceProtoUtil
         .toArchiveLogRequestProto(logName, location, recordId, isArchival, status).toByteString());
     LogServiceProtos.ArchiveLogReplyProto message=LogServiceProtos.ArchiveLogReplyProto
         .parseFrom(archiveLogReply.getMessage().getContent());
@@ -744,7 +745,7 @@ public class LogStateMachine extends BaseStateMachine {
   }
 
   private void sendChangeStateRequest(State st, boolean force) throws IOException {
-      getClient().send(
+      getClient().io().send(
           () -> LogServiceProtoUtil.toChangeStateRequestProto(LogName.of("Dummy"), st, force)
               .toByteString());
   }

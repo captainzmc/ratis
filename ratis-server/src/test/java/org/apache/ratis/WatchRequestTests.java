@@ -23,15 +23,16 @@ import org.apache.ratis.client.RaftClientConfigKeys;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.RaftProtos.CommitInfoProto;
 import org.apache.ratis.proto.RaftProtos.ReplicationLevel;
-import org.apache.ratis.protocol.AlreadyClosedException;
-import org.apache.ratis.protocol.NotReplicatedException;
+import org.apache.ratis.protocol.exceptions.AlreadyClosedException;
+import org.apache.ratis.protocol.exceptions.NotReplicatedException;
 import org.apache.ratis.protocol.RaftClientReply;
-import org.apache.ratis.protocol.RaftRetryFailureException;
-import org.apache.ratis.protocol.TimeoutIOException;
+import org.apache.ratis.protocol.exceptions.RaftRetryFailureException;
+import org.apache.ratis.protocol.exceptions.TimeoutIOException;
 import org.apache.ratis.retry.RetryPolicies;
 import org.apache.ratis.retry.RetryPolicy;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerImpl;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.server.impl.RaftServerTestUtil;
 import org.apache.ratis.statemachine.SimpleStateMachine4Testing;
 import org.apache.ratis.statemachine.StateMachine;
@@ -61,7 +62,7 @@ public abstract class WatchRequestTests<CLUSTER extends MiniRaftCluster>
     implements MiniRaftCluster.Factory.Get<CLUSTER> {
   {
     RaftServerTestUtil.setWatchRequestsLogLevel(Level.DEBUG);
-    Log4jUtils.setLogLevel(RaftServerImpl.LOG, Level.DEBUG);
+    Log4jUtils.setLogLevel(RaftServer.Division.LOG, Level.DEBUG);
   }
 
   static final int NUM_SERVERS = 3;
@@ -98,7 +99,8 @@ public abstract class WatchRequestTests<CLUSTER extends MiniRaftCluster>
       for(int i = 0; i < numMessages; i++) {
         final String message = "m" + i;
         log.info("SEND_REQUEST {}: message={}", i, message);
-        final CompletableFuture<RaftClientReply> replyFuture = writeClient.sendAsync(new RaftTestUtil.SimpleMessage(message));
+        final CompletableFuture<RaftClientReply> replyFuture =
+            writeClient.async().send(new RaftTestUtil.SimpleMessage(message));
         replies.add(replyFuture);
         final CompletableFuture<WatchReplies> watchFuture = new CompletableFuture<>();
         watches.add(watchFuture);
@@ -106,10 +108,10 @@ public abstract class WatchRequestTests<CLUSTER extends MiniRaftCluster>
           final long logIndex = reply.getLogIndex();
           log.info("SEND_WATCH: message={}, logIndex={}", message, logIndex);
           watchFuture.complete(new WatchReplies(logIndex,
-              writeClient.sendWatchAsync(logIndex, ReplicationLevel.MAJORITY),
-              writeClient.sendWatchAsync(logIndex, ReplicationLevel.ALL),
-              writeClient.sendWatchAsync(logIndex, ReplicationLevel.MAJORITY_COMMITTED),
-              writeClient.sendWatchAsync(logIndex, ReplicationLevel.ALL_COMMITTED),
+              writeClient.async().watch(logIndex, ReplicationLevel.MAJORITY),
+              writeClient.async().watch(logIndex, ReplicationLevel.ALL),
+              writeClient.async().watch(logIndex, ReplicationLevel.MAJORITY_COMMITTED),
+              writeClient.async().watch(logIndex, ReplicationLevel.ALL_COMMITTED),
               log));
         });
       }
@@ -122,11 +124,11 @@ public abstract class WatchRequestTests<CLUSTER extends MiniRaftCluster>
           cluster.createClient(RaftTestUtil.waitForLeader(cluster).getId(), policy)) {
 
         CompletableFuture<RaftClientReply> reply =
-            watchClient.sendAsync(new RaftTestUtil.SimpleMessage("message"));
+            watchClient.async().send(new RaftTestUtil.SimpleMessage("message"));
         long writeIndex = reply.get().getLogIndex();
         Assert.assertTrue(writeIndex > 0);
-        watchClient.sendWatchAsync(writeIndex, ReplicationLevel.MAJORITY_COMMITTED);
-        return watchClient.sendWatchAsync(logIndex, ReplicationLevel.MAJORITY);
+        watchClient.async().watch(writeIndex, ReplicationLevel.MAJORITY_COMMITTED);
+        return watchClient.async().watch(logIndex, ReplicationLevel.MAJORITY);
       }
 
     }
@@ -216,13 +218,13 @@ public abstract class WatchRequestTests<CLUSTER extends MiniRaftCluster>
     final int numMessages = p.numMessages;
 
     // blockStartTransaction of the leader so that no transaction can be committed MAJORITY
-    final RaftServerImpl leader = cluster.getLeader();
+    final RaftServer.Division leader = cluster.getLeader();
     LOG.info("block leader {}", leader.getId());
     SimpleStateMachine4Testing.get(leader).blockStartTransaction();
 
     // blockFlushStateMachineData a follower so that no transaction can be ALL_COMMITTED
-    final List<RaftServerImpl> followers = cluster.getFollowers();
-    final RaftServerImpl blockedFollower = followers.get(ThreadLocalRandom.current().nextInt(followers.size()));
+    final List<RaftServer.Division> followers = cluster.getFollowers();
+    final RaftServer.Division blockedFollower = followers.get(ThreadLocalRandom.current().nextInt(followers.size()));
     LOG.info("block follower {}", blockedFollower.getId());
     SimpleStateMachine4Testing.get(blockedFollower).blockFlushStateMachineData();
 
@@ -338,8 +340,8 @@ public abstract class WatchRequestTests<CLUSTER extends MiniRaftCluster>
     final int numMessages = p.numMessages;
 
     // blockFlushStateMachineData a follower so that no transaction can be ALL_COMMITTED
-    final List<RaftServerImpl> followers = cluster.getFollowers();
-    final RaftServerImpl blockedFollower = followers.get(ThreadLocalRandom.current().nextInt(followers.size()));
+    final List<RaftServer.Division> followers = cluster.getFollowers();
+    final RaftServer.Division blockedFollower = followers.get(ThreadLocalRandom.current().nextInt(followers.size()));
     LOG.info("block follower {}", blockedFollower.getId());
     SimpleStateMachine4Testing.get(blockedFollower).blockFlushStateMachineData();
 
@@ -390,13 +392,13 @@ public abstract class WatchRequestTests<CLUSTER extends MiniRaftCluster>
     final TimeDuration watchTimeoutDenomination = RaftServerConfigKeys.Watch.timeoutDenomination(properties);
 
     // blockStartTransaction of the leader so that no transaction can be committed MAJORITY
-    final RaftServerImpl leader = cluster.getLeader();
+    final RaftServer.Division leader = cluster.getLeader();
     LOG.info("block leader {}", leader.getId());
     SimpleStateMachine4Testing.get(leader).blockStartTransaction();
 
     // blockFlushStateMachineData a follower so that no transaction can be ALL_COMMITTED
-    final List<RaftServerImpl> followers = cluster.getFollowers();
-    final RaftServerImpl blockedFollower = followers.get(ThreadLocalRandom.current().nextInt(followers.size()));
+    final List<RaftServer.Division> followers = cluster.getFollowers();
+    final RaftServer.Division blockedFollower = followers.get(ThreadLocalRandom.current().nextInt(followers.size()));
     LOG.info("block follower {}", blockedFollower.getId());
     SimpleStateMachine4Testing.get(blockedFollower).blockFlushStateMachineData();
 

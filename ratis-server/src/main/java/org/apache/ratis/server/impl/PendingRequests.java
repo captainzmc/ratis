@@ -19,16 +19,17 @@ package org.apache.ratis.server.impl;
 
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.RaftProtos.CommitInfoProto;
-import org.apache.ratis.proto.RaftProtos.RaftClientRequestProto;
 import org.apache.ratis.protocol.Message;
-import org.apache.ratis.protocol.NotLeaderException;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftClientRequest;
-import org.apache.ratis.protocol.RaftException;
+import org.apache.ratis.protocol.exceptions.RaftException;
 import org.apache.ratis.protocol.RaftGroupMemberId;
 import org.apache.ratis.protocol.SetConfigurationRequest;
 import org.apache.ratis.server.RaftServerConfigKeys;
+import org.apache.ratis.server.metrics.RaftServerMetricsImpl;
 import org.apache.ratis.statemachine.TransactionContext;
+import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.Preconditions;
 import org.apache.ratis.util.ResourceSemaphore;
 import org.apache.ratis.util.SizeInBytes;
@@ -43,57 +44,76 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 
 class PendingRequests {
   public static final Logger LOG = LoggerFactory.getLogger(PendingRequests.class);
 
+  private static final int ONE_MB = SizeInBytes.ONE_MB.getSizeInt();
+
+  /**
+   * Round up to the nearest MB.
+   */
+  static int roundUpMb(long bytes) {
+    return Math.toIntExact((bytes - 1) / ONE_MB + 1);
+  }
+
   static class Permit {}
 
   static class RequestLimits extends ResourceSemaphore.Group {
-    RequestLimits(int elementLimit, SizeInBytes byteLimit) {
-      super(elementLimit, byteLimit.getSizeInt());
+    RequestLimits(int elementLimit, int megabyteLimit) {
+      super(elementLimit, megabyteLimit);
     }
 
     int getElementCount() {
       return get(0).used();
     }
 
-    int getByteSize() {
+    int getMegaByteSize() {
       return get(1).used();
     }
 
-    ResourceSemaphore.ResourceAcquireStatus tryAcquire(Message message) {
-      return tryAcquire(1, Message.getSize(message));
+    ResourceSemaphore.ResourceAcquireStatus tryAcquire(int messageSizeMb) {
+      return tryAcquire(1, messageSizeMb);
     }
 
-    void release(Message message) {
-      release(1, Message.getSize(message));
+    void releaseExtraMb(int extraMb) {
+      release(0, extraMb);
+    }
+
+    void release(int diffMb) {
+      release(1, diffMb);
     }
   }
 
   private static class RequestMap {
     private final Object name;
     private final ConcurrentMap<Long, PendingRequest> map = new ConcurrentHashMap<>();
-    private final RaftServerMetrics raftServerMetrics;
+    private final RaftServerMetricsImpl raftServerMetrics;
 
     /** Permits to put new requests, always synchronized. */
     private final Map<Permit, Permit> permits = new HashMap<>();
     /** Track and limit the number of requests and the total message size. */
     private final RequestLimits resource;
+    /** The size (in byte) of all the requests in this map. */
+    private final AtomicLong requestSize = new AtomicLong();
 
-    RequestMap(Object name, int elementLimit, SizeInBytes byteLimit, RaftServerMetrics raftServerMetrics) {
+
+    RequestMap(Object name, int elementLimit, int megabyteLimit, RaftServerMetricsImpl raftServerMetrics) {
       this.name = name;
-      this.resource = new RequestLimits(elementLimit, byteLimit);
+      this.resource = new RequestLimits(elementLimit, megabyteLimit);
       this.raftServerMetrics = raftServerMetrics;
 
       raftServerMetrics.addNumPendingRequestsGauge(resource::getElementCount);
-      raftServerMetrics.addNumPendingRequestsByteSize(resource::getByteSize);
+      raftServerMetrics.addNumPendingRequestsMegaByteSize(resource::getMegaByteSize);
     }
 
     Permit tryAcquire(Message message) {
-      final ResourceSemaphore.ResourceAcquireStatus acquired = resource.tryAcquire(message);
-      LOG.trace("tryAcquire? {}", acquired);
+      final int messageSize = Message.getSize(message);
+      final int messageSizeMb = roundUpMb(messageSize );
+      final ResourceSemaphore.ResourceAcquireStatus acquired = resource.tryAcquire(messageSizeMb);
+      LOG.trace("tryAcquire {} MB? {}", messageSizeMb, acquired);
       if (acquired == ResourceSemaphore.ResourceAcquireStatus.FAILED_IN_ELEMENT_LIMIT) {
         raftServerMetrics.onRequestQueueLimitHit();
         raftServerMetrics.onResourceLimitHit();
@@ -102,6 +122,14 @@ class PendingRequests {
         raftServerMetrics.onRequestByteSizeLimitHit();
         raftServerMetrics.onResourceLimitHit();
         return null;
+      }
+
+      // release extra MB
+      final long oldSize = requestSize.getAndAdd(messageSize);
+      final long newSize = oldSize + messageSize;
+      final int diffMb = roundUpMb(newSize) - roundUpMb(oldSize);
+      if (messageSizeMb > diffMb) {
+        resource.releaseExtraMb(messageSizeMb - diffMb);
       }
       return putPermit();
     }
@@ -139,8 +167,12 @@ class PendingRequests {
       if (r == null) {
         return null;
       }
-      resource.release(r.getRequest().getMessage());
-      LOG.trace("release");
+      final int messageSize = Message.getSize(r.getRequest().getMessage());
+      final long oldSize = requestSize.getAndAdd(-messageSize);
+      final long newSize = oldSize - messageSize;
+      final int diffMb = roundUpMb(oldSize) - roundUpMb(newSize);
+      resource.release(diffMb);
+      LOG.trace("release {} MB", diffMb);
       return r;
     }
 
@@ -165,17 +197,26 @@ class PendingRequests {
         }
       }
     }
+
+    void close() {
+      if (raftServerMetrics != null) {
+        raftServerMetrics.removeNumPendingRequestsGauge();
+        raftServerMetrics.removeNumPendingRequestsByteSize();
+      }
+    }
   }
 
   private PendingRequest pendingSetConf;
   private final String name;
   private final RequestMap pendingRequests;
 
-  PendingRequests(RaftGroupMemberId id, RaftProperties properties, RaftServerMetrics raftServerMetrics) {
-    this.name = id + "-" + getClass().getSimpleName();
+  PendingRequests(RaftGroupMemberId id, RaftProperties properties, RaftServerMetricsImpl raftServerMetrics) {
+    this.name = id + "-" + JavaUtils.getClassSimpleName(getClass());
     this.pendingRequests = new RequestMap(id,
         RaftServerConfigKeys.Write.elementLimit(properties),
-        RaftServerConfigKeys.Write.byteLimit(properties),
+        Math.toIntExact(
+            RaftServerConfigKeys.Write.byteLimit(properties).getSize()
+                / SizeInBytes.ONE_MB.getSize()), //round down
         raftServerMetrics);
   }
 
@@ -185,7 +226,6 @@ class PendingRequests {
 
   PendingRequest add(Permit permit, RaftClientRequest request, TransactionContext entry) {
     // externally synced for now
-    Preconditions.assertTrue(request.is(RaftClientRequestProto.TypeCase.WRITE));
     final long index = entry.getLogEntry().getIndex();
     LOG.debug("{}: addPendingRequest at index={}, request={}", name, index, request);
     final PendingRequest pending = new PendingRequest(index, request, entry);
@@ -198,7 +238,7 @@ class PendingRequests {
     return pendingSetConf;
   }
 
-  void replySetConfiguration(Supplier<Collection<CommitInfoProto>> getCommitInfos) {
+  void replySetConfiguration(Function<RaftClientRequest, RaftClientReply> newSuccessReply) {
     // we allow the pendingRequest to be null in case that the new leader
     // commits the new configuration while it has not received the retry
     // request from the client
@@ -207,7 +247,7 @@ class PendingRequests {
       LOG.debug("{}: sends success for {}", name, request);
       // for setConfiguration we do not need to wait for statemachine. send back
       // reply after it's committed.
-      pendingSetConf.setReply(new RaftClientReply(request, getCommitInfos.get()));
+      pendingSetConf.setReply(newSuccessReply.apply(request));
       pendingSetConf = null;
     }
   }
@@ -246,5 +286,11 @@ class PendingRequests {
       pendingSetConf.setNotLeaderException(nle, commitInfos);
     }
     return transactions;
+  }
+
+  void close() {
+    if (pendingRequests != null) {
+      pendingRequests.close();
+    }
   }
 }

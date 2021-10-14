@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,6 +19,7 @@ package org.apache.ratis.protocol;
 
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -26,13 +27,18 @@ import java.util.UUID;
  * to correctly identify retry requests from the same client.
  */
 public final class ClientId extends RaftId {
+  private static final ClientId EMPTY_CLIENT_ID = new ClientId(ZERO_UUID_BYTESTRING);
+
+  public static ClientId emptyClientId() {
+    return EMPTY_CLIENT_ID;
+  }
 
   public static ClientId randomId() {
     return new ClientId(UUID.randomUUID());
   }
 
   public static ClientId valueOf(ByteString data) {
-    return new ClientId(data);
+    return Optional.ofNullable(data).filter(d -> !d.isEmpty()).map(ClientId::new).orElse(EMPTY_CLIENT_ID);
   }
 
   public static ClientId valueOf(UUID uuid) {

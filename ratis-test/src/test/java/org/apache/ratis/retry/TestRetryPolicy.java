@@ -24,13 +24,13 @@ import org.apache.ratis.client.retry.RequestTypeDependentRetryPolicy;
 import org.apache.ratis.proto.RaftProtos.RaftClientRequestProto;
 import org.apache.ratis.proto.RaftProtos.ReplicationLevel;
 import org.apache.ratis.protocol.ClientId;
-import org.apache.ratis.protocol.LeaderNotReadyException;
-import org.apache.ratis.protocol.NotLeaderException;
+import org.apache.ratis.protocol.exceptions.LeaderNotReadyException;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
 import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.protocol.RaftGroupMemberId;
 import org.apache.ratis.protocol.RaftPeerId;
-import org.apache.ratis.protocol.TimeoutIOException;
+import org.apache.ratis.protocol.exceptions.TimeoutIOException;
 import org.apache.ratis.protocol.exceptions.ResourceUnavailableException;
 import org.apache.ratis.util.TimeDuration;
 import org.junit.Assert;
@@ -76,8 +76,8 @@ public class TestRetryPolicy extends BaseTest {
     final int n = 4;
     final TimeDuration writeSleep = HUNDRED_MILLIS;
     final RetryPolicies.RetryLimited writePolicy = RetryPolicies.retryUpToMaximumCountWithFixedSleep(n, writeSleep);
-    b.set(RaftClientRequestProto.TypeCase.WRITE, writePolicy);
-    b.set(RaftClientRequestProto.TypeCase.WATCH, RetryPolicies.noRetry());
+    b.setRetryPolicy(RaftClientRequestProto.TypeCase.WRITE, writePolicy);
+    b.setRetryPolicy(RaftClientRequestProto.TypeCase.WATCH, RetryPolicies.noRetry());
     final RetryPolicy policy = b.build();
     LOG.info("policy = {}", policy);
 
@@ -128,10 +128,11 @@ public class TestRetryPolicy extends BaseTest {
   public void testRequestTypeDependentRetryWithTimeout()
       throws InterruptedException {
     final RequestTypeDependentRetryPolicy.Builder b = RequestTypeDependentRetryPolicy.newBuilder();
-    b.set(RaftClientRequestProto.TypeCase.WRITE, RetryPolicies.retryForeverNoSleep());
-    b.set(RaftClientRequestProto.TypeCase.WATCH, RetryPolicies.retryForeverNoSleep());
+    b.setRetryPolicy(RaftClientRequestProto.TypeCase.WRITE, RetryPolicies.retryForeverNoSleep());
+    b.setRetryPolicy(RaftClientRequestProto.TypeCase.WATCH, RetryPolicies.retryForeverNoSleep());
     TimeDuration timeout = TimeDuration.valueOf(10, TimeUnit.MILLISECONDS);
-    final RetryPolicy policy = b.setTimeout(timeout).build();
+    final RetryPolicy policy = b.setTimeout(RaftClientRequestProto.TypeCase.WRITE, timeout)
+            .setTimeout(RaftClientRequestProto.TypeCase.WATCH, timeout).build();
     LOG.info("policy = {}", policy);
 
     final RaftClientRequest writeRequest = newRaftClientRequest(RaftClientRequest.writeRequestType());
@@ -172,8 +173,10 @@ public class TestRetryPolicy extends BaseTest {
     exceptionPolicyMap.put(ResourceUnavailableException.class, new Pair(5, 5));
     Pair defaultPolicy = new Pair(10, 2);
 
-    retryPolicy.set(RaftClientRequestProto.TypeCase.WRITE, buildExceptionBasedRetry(exceptionPolicyMap, defaultPolicy));
-    retryPolicy.set(RaftClientRequestProto.TypeCase.WATCH, buildExceptionBasedRetry(exceptionPolicyMap, defaultPolicy));
+      retryPolicy.setRetryPolicy(RaftClientRequestProto.TypeCase.WRITE,
+          buildExceptionBasedRetry(exceptionPolicyMap, defaultPolicy));
+      retryPolicy.setRetryPolicy(RaftClientRequestProto.TypeCase.WATCH,
+          buildExceptionBasedRetry(exceptionPolicyMap, defaultPolicy));
 
     final RetryPolicy policy = retryPolicy.build();
     LOG.info("policy = {}", policy);
@@ -274,7 +277,13 @@ public class TestRetryPolicy extends BaseTest {
 
 
   private static RaftClientRequest newRaftClientRequest(RaftClientRequest.Type type) {
-    return new RaftClientRequest(ClientId.randomId(), RaftPeerId.valueOf("s0"), RaftGroupId.randomId(), 1L, type);
+    return RaftClientRequest.newBuilder()
+        .setClientId(ClientId.randomId())
+        .setServerId(RaftPeerId.valueOf("s0"))
+        .setGroupId(RaftGroupId.randomId())
+        .setCallId(1L)
+        .setType(type)
+        .build();
   }
 
   /**

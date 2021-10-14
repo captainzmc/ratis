@@ -20,7 +20,14 @@ package org.apache.ratis.server.metrics;
 
 import org.apache.ratis.metrics.MetricRegistryInfo;
 import org.apache.ratis.metrics.RatisMetricRegistry;
-import org.apache.ratis.server.impl.RaftServerImpl;
+import org.apache.ratis.metrics.RatisMetrics;
+import org.apache.ratis.protocol.RaftGroupMemberId;
+import org.apache.ratis.util.Timestamp;
+
+import com.codahale.metrics.Timer;
+
+import java.util.Optional;
+import java.util.function.LongSupplier;
 
 /**
  * Class to update the metrics related to Leader Election.
@@ -31,34 +38,39 @@ public final class LeaderElectionMetrics extends RatisMetrics {
   public static final String RATIS_LEADER_ELECTION_METRICS_DESC = "Metrics for Ratis Leader Election.";
 
   public static final String LEADER_ELECTION_COUNT_METRIC = "electionCount";
-  public static final String LEADER_ELECTION_TIMEOUT_COUNT_METRIC = "electionTimeoutCount";
-  public static final String LEADER_ELECTION_LATENCY = "electionLatency";
+  public static final String LEADER_ELECTION_TIMEOUT_COUNT_METRIC = "timeoutCount";
+  public static final String LEADER_ELECTION_TIME_TAKEN = "electionTime";
   public static final String LAST_LEADER_ELAPSED_TIME = "lastLeaderElapsedTime";
 
-  private long leaderElectionCompletionLatency = 0L;
+  public static final String LAST_LEADER_ELECTION_ELAPSED_TIME =
+      "lastLeaderElectionElapsedTime";
+  private volatile Timestamp lastElectionTime;
 
-  private LeaderElectionMetrics(RaftServerImpl raftServer) {
-    this.registry = getMetricRegistryForLeaderElection(raftServer.getMemberId().toString());
-    registry.gauge(LEADER_ELECTION_LATENCY, () -> () -> leaderElectionCompletionLatency);
-    registry.gauge(LAST_LEADER_ELAPSED_TIME, () -> () -> raftServer.getState().getLastLeaderElapsedTimeMs());
+  private LeaderElectionMetrics(RaftGroupMemberId serverId, LongSupplier getLastLeaderElapsedTimeMs) {
+    this.registry = getMetricRegistryForLeaderElection(serverId);
+    registry.gauge(LAST_LEADER_ELAPSED_TIME, () -> getLastLeaderElapsedTimeMs::getAsLong);
+    registry.gauge(LAST_LEADER_ELECTION_ELAPSED_TIME,
+        () -> () -> Optional.ofNullable(lastElectionTime).map(Timestamp::elapsedTimeMs).orElse(-1L));
   }
 
-  private RatisMetricRegistry getMetricRegistryForLeaderElection(String serverId) {
-    return create(new MetricRegistryInfo(serverId,
+  public static RatisMetricRegistry getMetricRegistryForLeaderElection(RaftGroupMemberId serverId) {
+    return create(new MetricRegistryInfo(serverId.toString(),
         RATIS_APPLICATION_NAME_METRICS, RATIS_LEADER_ELECTION_METRICS,
         RATIS_LEADER_ELECTION_METRICS_DESC));
   }
 
-  public static LeaderElectionMetrics getLeaderElectionMetrics(RaftServerImpl raftServer) {
-    return new LeaderElectionMetrics(raftServer);
+  public static LeaderElectionMetrics getLeaderElectionMetrics(
+      RaftGroupMemberId serverId, LongSupplier getLastLeaderElapsedTimeMs) {
+    return new LeaderElectionMetrics(serverId, getLastLeaderElapsedTimeMs);
   }
 
-  public void onNewLeaderElection() {
+  public void onNewLeaderElectionCompletion() {
     registry.counter(LEADER_ELECTION_COUNT_METRIC).inc();
+    lastElectionTime = Timestamp.currentTime();
   }
 
-  public void onLeaderElectionCompletion(long elapsedTime) {
-    this.leaderElectionCompletionLatency = elapsedTime;
+  public Timer getLeaderElectionTimer() {
+    return registry.timer(LEADER_ELECTION_TIME_TAKEN);
   }
 
   public void onLeaderElectionTimeout() {

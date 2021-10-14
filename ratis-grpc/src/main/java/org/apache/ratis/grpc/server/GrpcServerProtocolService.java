@@ -17,11 +17,12 @@
  */
 package org.apache.ratis.grpc.server;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.ratis.grpc.GrpcUtil;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.apache.ratis.server.RaftServer;
-import org.apache.ratis.server.impl.ServerProtoUtils;
 import org.apache.ratis.server.protocol.RaftServerProtocol;
+import org.apache.ratis.server.util.ServerStringUtils;
 import org.apache.ratis.thirdparty.io.grpc.Status;
 import org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException;
 import org.apache.ratis.thirdparty.io.grpc.stub.StreamObserver;
@@ -41,7 +42,7 @@ import java.util.function.Supplier;
 class GrpcServerProtocolService extends RaftServerProtocolServiceImplBase {
   public static final Logger LOG = LoggerFactory.getLogger(GrpcServerProtocolService.class);
 
-  class PendingServerRequest<REQUEST> {
+  static class PendingServerRequest<REQUEST> {
     private final REQUEST request;
     private final CompletableFuture<Void> future = new CompletableFuture<>();
 
@@ -95,7 +96,7 @@ class GrpcServerProtocolService extends RaftServerProtocolServiceImplBase {
       responseObserver.onError(wrapException(e, request));
     }
 
-    private void handleReply(REPLY reply) {
+    private synchronized void handleReply(REPLY reply) {
       if (!isClosed.get()) {
         if (LOG.isDebugEnabled()) {
           LOG.debug("{}: reply {}", getId(), replyToString(reply));
@@ -105,11 +106,12 @@ class GrpcServerProtocolService extends RaftServerProtocolServiceImplBase {
     }
 
     @Override
+    @SuppressFBWarnings("NP_NULL_PARAM_DEREF")
     public void onNext(REQUEST request) {
       if (!replyInOrder(request)) {
         try {
           process(request).thenAccept(this::handleReply);
-        } catch (Throwable e) {
+        } catch (Exception e) {
           handleError(e, request);
         }
         return;
@@ -126,7 +128,7 @@ class GrpcServerProtocolService extends RaftServerProtocolServiceImplBase {
           current.getFuture().complete(null);
           return null;
         });
-      } catch (Throwable e) {
+      } catch (Exception e) {
         handleError(e, request);
         current.getFuture().completeExceptionally(e);
       }
@@ -170,8 +172,22 @@ class GrpcServerProtocolService extends RaftServerProtocolServiceImplBase {
       final RequestVoteReplyProto reply = server.requestVote(request);
       responseObserver.onNext(reply);
       responseObserver.onCompleted();
-    } catch (Throwable e) {
+    } catch (Exception e) {
       GrpcUtil.warn(LOG, () -> getId() + ": Failed requestVote " + ProtoUtils.toString(request.getServerRequest()), e);
+      responseObserver.onError(GrpcUtil.wrapException(e));
+    }
+  }
+
+  @Override
+  public void startLeaderElection(StartLeaderElectionRequestProto request,
+      StreamObserver<StartLeaderElectionReplyProto> responseObserver) {
+    try {
+      final StartLeaderElectionReplyProto reply = server.startLeaderElection(request);
+      responseObserver.onNext(reply);
+      responseObserver.onCompleted();
+    } catch (Throwable e) {
+      GrpcUtil.warn(LOG,
+          () -> getId() + ": Failed startLeaderElection " + ProtoUtils.toString(request.getServerRequest()), e);
       responseObserver.onError(GrpcUtil.wrapException(e));
     }
   }
@@ -193,12 +209,12 @@ class GrpcServerProtocolService extends RaftServerProtocolServiceImplBase {
 
       @Override
       String requestToString(AppendEntriesRequestProto request) {
-        return ServerProtoUtils.toString(request);
+        return ServerStringUtils.toAppendEntriesRequestString(request);
       }
 
       @Override
       String replyToString(AppendEntriesReplyProto reply) {
-        return ServerProtoUtils.toString(reply);
+        return ServerStringUtils.toAppendEntriesReplyString(reply);
       }
 
       @Override
@@ -230,12 +246,12 @@ class GrpcServerProtocolService extends RaftServerProtocolServiceImplBase {
 
       @Override
       String requestToString(InstallSnapshotRequestProto request) {
-        return ServerProtoUtils.toString(request);
+        return ServerStringUtils.toInstallSnapshotRequestString(request);
       }
 
       @Override
       String replyToString(InstallSnapshotReplyProto reply) {
-        return ServerProtoUtils.toString(reply);
+        return ServerStringUtils.toInstallSnapshotReplyString(reply);
       }
 
       @Override

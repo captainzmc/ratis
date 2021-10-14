@@ -20,15 +20,14 @@ package org.apache.ratis.server.raftlog.segmented;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerConstants;
-import org.apache.ratis.server.impl.ServerProtoUtils;
-import org.apache.ratis.server.metrics.RaftLogMetrics;
+import org.apache.ratis.server.metrics.SegmentedRaftLogMetrics;
 import org.apache.ratis.server.protocol.TermIndex;
+import org.apache.ratis.server.raftlog.LogEntryHeader;
+import org.apache.ratis.server.raftlog.LogProtoUtils;
 import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.server.storage.RaftStorage;
 import org.apache.ratis.server.raftlog.segmented.CacheInvalidationPolicy.CacheInvalidationPolicyDefault;
 import org.apache.ratis.server.raftlog.segmented.LogSegment.LogRecord;
-import org.apache.ratis.server.storage.RaftStorageDirectory.LogPathAndIndex;
 import org.apache.ratis.util.AutoCloseableLock;
 import org.apache.ratis.util.AutoCloseableReadWriteLock;
 import org.apache.ratis.util.JavaUtils;
@@ -36,6 +35,7 @@ import org.apache.ratis.util.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.function.Consumer;
@@ -45,7 +45,7 @@ import java.util.function.Consumer;
  * caches all the segments in the memory. The cache is not thread-safe and
  * requires external lock protection.
  */
-class SegmentedRaftLogCache {
+public class SegmentedRaftLogCache {
   public static final Logger LOG = LoggerFactory.getLogger(SegmentedRaftLogCache.class);
 
   static final class SegmentFileInfo {
@@ -87,6 +87,14 @@ class SegmentedRaftLogCache {
       this.isOpen = isOpen;
       this.targetLength = targetLength;
       this.newEndIndex = newEndIndex;
+    }
+
+    File getFile(RaftStorage storage) {
+      return LogSegmentStartEnd.valueOf(startIndex, endIndex, isOpen).getFile(storage);
+    }
+
+    File getNewFile(RaftStorage storage) {
+      return LogSegmentStartEnd.valueOf(startIndex, newEndIndex, false).getFile(storage);
     }
 
     @Override
@@ -138,10 +146,12 @@ class SegmentedRaftLogCache {
     private final Object name;
     private final List<LogSegment> segments = new ArrayList<>();
     private final AutoCloseableReadWriteLock lock;
+    private long sizeInBytes;
 
     LogSegmentList(Object name) {
       this.name = name;
       this.lock = new AutoCloseableReadWriteLock(name);
+      this.sizeInBytes = 0;
     }
 
     AutoCloseableLock readLock() {
@@ -163,6 +173,21 @@ class SegmentedRaftLogCache {
     int size() {
       try(AutoCloseableLock readLock = readLock()) {
         return segments.size();
+      }
+    }
+
+    long getTotalFileSize() {
+      return sizeInBytes;
+    }
+
+    long getTotalCacheSize() {
+      try(AutoCloseableLock readLock = readLock()) {
+        long size = 0;
+        // TODO(runzhiwang): If there is performance problem, start a daemon thread to checkAndEvictCache.
+        for (LogSegment seg : segments) {
+          size += seg.getTotalCacheSize();
+        }
+        return size;
       }
     }
 
@@ -197,8 +222,8 @@ class SegmentedRaftLogCache {
       }
     }
 
-    TermIndex[] getTermIndex(long startIndex, long realEnd, LogSegment openSegment) {
-      final TermIndex[] entries = new TermIndex[Math.toIntExact(realEnd - startIndex)];
+    LogEntryHeader[] getTermIndex(long startIndex, long realEnd, LogSegment openSegment) {
+      final LogEntryHeader[] entries = new LogEntryHeader[Math.toIntExact(realEnd - startIndex)];
       final int searchIndex;
       long index = startIndex;
 
@@ -226,6 +251,7 @@ class SegmentedRaftLogCache {
 
     boolean add(LogSegment logSegment) {
       try(AutoCloseableLock writeLock = writeLock()) {
+        sizeInBytes += logSegment.getTotalFileSize();
         return segments.add(logSegment);
       }
     }
@@ -234,6 +260,7 @@ class SegmentedRaftLogCache {
       try(AutoCloseableLock writeLock = writeLock()) {
         segments.forEach(LogSegment::clear);
         segments.clear();
+        sizeInBytes = 0;
       }
     }
 
@@ -251,8 +278,9 @@ class SegmentedRaftLogCache {
               openSegment.truncate(index);
               Preconditions.assertTrue(!openSegment.isOpen());
               final SegmentFileInfo info = new SegmentFileInfo(openSegment.getStartIndex(),
-                  oldEnd, true, openSegment.getTotalSize(), openSegment.getEndIndex());
+                  oldEnd, true, openSegment.getTotalFileSize(), openSegment.getEndIndex());
               segments.add(openSegment);
+              sizeInBytes += openSegment.getTotalFileSize();
               clearOpenSegment.run();
               return new TruncationSegments(info, Collections.emptyList());
             }
@@ -261,12 +289,15 @@ class SegmentedRaftLogCache {
           final LogSegment ts = segments.get(segmentIndex);
           final long oldEnd = ts.getEndIndex();
           final List<SegmentFileInfo> list = new ArrayList<>();
+          sizeInBytes -= ts.getTotalFileSize();
           ts.truncate(index);
+          sizeInBytes += ts.getTotalFileSize();
           final int size = segments.size();
           for(int i = size - 1;
               i >= (ts.numOfEntries() == 0? segmentIndex: segmentIndex + 1);
               i--) {
             LogSegment s = segments.remove(i);
+            sizeInBytes -= s.getTotalFileSize();
             final long endOfS = i == segmentIndex? oldEnd: s.getEndIndex();
             s.clear();
             list.add(new SegmentFileInfo(s.getStartIndex(), endOfS, false, 0, s.getEndIndex()));
@@ -275,7 +306,7 @@ class SegmentedRaftLogCache {
             list.add(deleteOpenSegment(openSegment, clearOpenSegment));
           }
           SegmentFileInfo t = ts.numOfEntries() == 0? null:
-              new SegmentFileInfo(ts.getStartIndex(), oldEnd, false, ts.getTotalSize(), ts.getEndIndex());
+              new SegmentFileInfo(ts.getStartIndex(), oldEnd, false, ts.getTotalFileSize(), ts.getEndIndex());
           return new TruncationSegments(t, list);
         }
         return null;
@@ -292,10 +323,18 @@ class SegmentedRaftLogCache {
             list.add(SegmentFileInfo.newClosedSegmentFileInfo(ls));
           }
           segments.clear();
+          sizeInBytes = 0;
         } else if (segmentIndex >= 0) {
           // we start to purge the closedSegments which do not overlap with index.
-          for (int i = segmentIndex - 1; i >= 0; i--) {
-            list.add(SegmentFileInfo.newClosedSegmentFileInfo(segments.remove(i)));
+          LogSegment overlappedSegment = segments.get(segmentIndex);
+          // if a segment's end index matches the passed in index, it is OK
+          // to purge that.
+          int startIndex = (overlappedSegment.getEndIndex() == index) ?
+              segmentIndex : segmentIndex - 1;
+          for (int i = startIndex; i >= 0; i--) {
+            LogSegment segment = segments.remove(i);
+            sizeInBytes -= segment.getTotalFileSize();
+            list.add(SegmentFileInfo.newClosedSegmentFileInfo(segment));
           }
         } else {
           throw new IllegalStateException("Unexpected gap in segments: binarySearch(" + index + ") returns "
@@ -319,49 +358,61 @@ class SegmentedRaftLogCache {
   private volatile LogSegment openSegment;
   private final LogSegmentList closedSegments;
   private final RaftStorage storage;
-  private final RaftLogMetrics raftLogMetrics;
+  private final SegmentedRaftLogMetrics raftLogMetrics;
 
   private final int maxCachedSegments;
   private final CacheInvalidationPolicy evictionPolicy = new CacheInvalidationPolicyDefault();
-
-  SegmentedRaftLogCache(Object name, RaftStorage storage, RaftProperties properties) {
-    this(name, storage, properties, null);
-  }
+  private final long maxSegmentCacheSize;
 
   SegmentedRaftLogCache(Object name, RaftStorage storage, RaftProperties properties,
-                                RaftLogMetrics raftLogMetrics) {
-    this.name = name + "-" + getClass().getSimpleName();
+      SegmentedRaftLogMetrics raftLogMetrics) {
+    this.name = name + "-" + JavaUtils.getClassSimpleName(getClass());
     this.closedSegments = new LogSegmentList(name);
     this.storage = storage;
     this.raftLogMetrics = raftLogMetrics;
+    this.raftLogMetrics.addClosedSegmentsNum(this);
+    this.raftLogMetrics.addClosedSegmentsSizeInBytes(this);
+    this.raftLogMetrics.addOpenSegmentSizeInBytes(this);
     this.maxCachedSegments = RaftServerConfigKeys.Log.segmentCacheNumMax(properties);
+    this.maxSegmentCacheSize = RaftServerConfigKeys.Log.segmentCacheSizeMax(properties).getSize();
   }
 
   int getMaxCachedSegments() {
     return maxCachedSegments;
   }
 
-  void loadSegment(LogPathAndIndex pi, boolean keepEntryInCache,
+  void loadSegment(LogSegmentPath pi, boolean keepEntryInCache,
       Consumer<LogEntryProto> logConsumer) throws IOException {
-    LogSegment logSegment = LogSegment.loadSegment(storage, pi.getPath().toFile(),
-        pi.getStartIndex(), pi.getEndIndex(), pi.isOpen(), keepEntryInCache, logConsumer, raftLogMetrics);
+    final LogSegment logSegment = LogSegment.loadSegment(storage, pi.getPath().toFile(), pi.getStartEnd(),
+        keepEntryInCache, logConsumer, raftLogMetrics);
     if (logSegment != null) {
       addSegment(logSegment);
     }
   }
 
-  long getCachedSegmentNum() {
+  public long getCachedSegmentNum() {
     return closedSegments.countCached();
   }
 
-  boolean shouldEvict() {
-    return closedSegments.countCached() > maxCachedSegments;
+  public long getClosedSegmentsSizeInBytes() {
+    return closedSegments.getTotalFileSize();
   }
 
-  void evictCache(long[] followerIndices, long flushedIndex,
-      long lastAppliedIndex) {
+  public long getOpenSegmentSizeInBytes() {
+    return openSegment == null ? 0 : openSegment.getTotalFileSize();
+  }
+
+  public long getTotalCacheSize() {
+    return closedSegments.getTotalCacheSize() + openSegment.getTotalCacheSize();
+  }
+
+  boolean shouldEvict() {
+    return closedSegments.countCached() > maxCachedSegments || getTotalCacheSize() > maxSegmentCacheSize;
+  }
+
+  void evictCache(long[] followerIndices, long safeEvictIndex, long lastAppliedIndex) {
     List<LogSegment> toEvict = evictionPolicy.evict(followerIndices,
-        flushedIndex, lastAppliedIndex, closedSegments, maxCachedSegments);
+        safeEvictIndex, lastAppliedIndex, closedSegments, maxCachedSegments);
     for (LogSegment s : toEvict) {
       s.evictCache();
     }
@@ -437,7 +488,7 @@ class SegmentedRaftLogCache {
    * @param startIndex inclusive
    * @param endIndex exclusive
    */
-  TermIndex[] getTermIndices(final long startIndex, final long endIndex) {
+  LogEntryHeader[] getTermIndices(final long startIndex, final long endIndex) {
     if (startIndex < 0 || startIndex < getStartIndex()) {
       throw new IndexOutOfBoundsException("startIndex = " + startIndex
           + ", log cache starts from index " + getStartIndex());
@@ -448,31 +499,24 @@ class SegmentedRaftLogCache {
     }
     final long realEnd = Math.min(getEndIndex() + 1, endIndex);
     if (startIndex >= realEnd) {
-      return TermIndex.EMPTY_TERMINDEX_ARRAY;
+      return LogEntryHeader.EMPTY_ARRAY;
     }
     return closedSegments.getTermIndex(startIndex, realEnd, openSegment);
   }
 
   private static void getFromSegment(LogSegment segment, long startIndex,
-      TermIndex[] entries, int offset, int size) {
+      LogEntryHeader[] entries, int offset, int size) {
     long endIndex = segment.getEndIndex();
     endIndex = Math.min(endIndex, startIndex + size - 1);
     int index = offset;
     for (long i = startIndex; i <= endIndex; i++) {
-      LogRecord r = segment.getLogRecord(i);
-      entries[index++] = r == null ? null : r.getTermIndex();
+      entries[index++] = Optional.ofNullable(segment.getLogRecord(i)).map(LogRecord::getLogEntryHeader).orElse(null);
     }
-  }
-
-  boolean isConfigEntry(TermIndex ti) {
-    LogSegment segment = getSegment(ti.getIndex());
-    return segment != null && segment.isConfigEntry(ti);
   }
 
   long getStartIndex() {
     if (closedSegments.isEmpty()) {
-      return openSegment != null ? openSegment.getStartIndex() :
-          RaftServerConstants.INVALID_LOG_INDEX;
+      return Optional.ofNullable(openSegment).map(LogSegment::getStartIndex).orElse(RaftLog.INVALID_LOG_INDEX);
     } else {
       return closedSegments.get(0).getStartIndex();
     }
@@ -485,6 +529,11 @@ class SegmentedRaftLogCache {
             closedSegments.get(closedSegments.size() - 1).getEndIndex());
   }
 
+  long getLastIndexInClosedSegments() {
+    return (closedSegments.isEmpty() ? RaftLog.INVALID_LOG_INDEX :
+        closedSegments.get(closedSegments.size() - 1).getEndIndex());
+  }
+
   TermIndex getLastTermIndex() {
     return (openSegment != null && openSegment.numOfEntries() > 0) ?
         openSegment.getLastTermIndex() :
@@ -492,11 +541,11 @@ class SegmentedRaftLogCache {
             closedSegments.get(closedSegments.size() - 1).getLastTermIndex());
   }
 
-  void appendEntry(LogEntryProto entry) {
+  void appendEntry(LogEntryProto entry, LogSegment.Op op) {
     // SegmentedRaftLog does the segment creation/rolling work. Here we just
     // simply append the entry into the open segment.
     Preconditions.assertTrue(openSegment != null);
-    openSegment.appendToOpenSegment(entry);
+    openSegment.appendToOpenSegment(entry, op);
   }
 
   /**
@@ -550,8 +599,8 @@ class SegmentedRaftLogCache {
           if (LOG.isTraceEnabled()) {
             LOG.trace("{}: truncate to {}, arrayIndex={}, ti={}, storedEntry={}, entries={}",
                 name, truncateIndex, arrayIndex,
-                ServerProtoUtils.toTermIndex(entries[arrayIndex]), storedEntry,
-                ServerProtoUtils.toString(entries));
+                TermIndex.valueOf(entries[arrayIndex]), storedEntry,
+                LogProtoUtils.toLogEntriesString(entries));
           }
 
           // fail all requests starting at truncateIndex
@@ -622,7 +671,7 @@ class SegmentedRaftLogCache {
     return closedSegments.isEmpty() && openSegment == null;
   }
 
-  void clear() {
+  void close() {
     if (openSegment != null) {
       openSegment.clear();
       clearOpenSegment();

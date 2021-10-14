@@ -25,18 +25,21 @@ import org.apache.ratis.client.impl.RaftClientTestUtil;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.RaftProtos.CommitInfoProto;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
-import org.apache.ratis.protocol.AlreadyClosedException;
+import org.apache.ratis.protocol.exceptions.AlreadyClosedException;
 import org.apache.ratis.protocol.Message;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftGroup;
 import org.apache.ratis.protocol.RaftPeerId;
-import org.apache.ratis.protocol.RaftRetryFailureException;
-import org.apache.ratis.protocol.StateMachineException;
+import org.apache.ratis.protocol.exceptions.RaftRetryFailureException;
+import org.apache.ratis.protocol.exceptions.StateMachineException;
 import org.apache.ratis.retry.RetryPolicies;
 import org.apache.ratis.retry.RetryPolicies.RetryLimited;
 import org.apache.ratis.retry.RetryPolicy;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerImpl;
+import org.apache.ratis.server.impl.DelayLocalExecutionInjection;
+import org.apache.ratis.server.impl.MiniRaftCluster;
+import org.apache.ratis.server.impl.RaftServerTestUtil;
 import org.apache.ratis.statemachine.SimpleStateMachine4Testing;
 import org.apache.ratis.statemachine.StateMachine;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
@@ -59,17 +62,20 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.StreamSupport;
 
 import static org.apache.ratis.RaftTestUtil.waitForLeader;
 
 public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends BaseTest
     implements MiniRaftCluster.Factory.Get<CLUSTER> {
   {
-    Log4jUtils.setLogLevel(RaftServerImpl.LOG, Level.DEBUG);
+    Log4jUtils.setLogLevel(RaftServer.Division.LOG, Level.DEBUG);
     Log4jUtils.setLogLevel(RaftClient.LOG, Level.DEBUG);
   }
 
   public static final int NUM_SERVERS = 3;
+
+  private static final DelayLocalExecutionInjection logSyncDelay = RaftServerTestUtil.getLogSyncDelay();
 
   {
     getProperties().setClass(MiniRaftCluster.STATEMACHINE_CLASS_KEY,
@@ -80,6 +86,7 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
   public void testAsyncConfiguration() throws IOException {
     LOG.info("Running testAsyncConfiguration");
     final RaftProperties properties = new RaftProperties();
+    RaftClientConfigKeys.Async.Experimental.setSendDummyRequest(properties, false);
     RaftClient.Builder clientBuilder = RaftClient.newBuilder()
         .setRaftGroup(RaftGroup.emptyGroup())
         .setProperties(properties);
@@ -129,7 +136,7 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
         final SimpleMessage[] messages = SimpleMessage.create(10, "initial-");
         final List<CompletableFuture<RaftClientReply>> replies = new ArrayList<>();
         for (int i = 0; i < messages.length; i++) {
-          replies.add(client.sendAsync(messages[i]));
+          replies.add(client.async().send(messages[i]));
         }
         for (int i = 0; i < messages.length; i++) {
           RaftTestUtil.assertSuccessReply(replies.get(i));
@@ -146,7 +153,7 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
         int i = 0;
         // send half of the calls without starting the cluster
         for (; i < messages.length/2; i++) {
-          replies.add(client.sendAsync(messages[i]));
+          replies.add(client.async().send(messages[i]));
         }
 
         // sleep most of the retry time
@@ -154,7 +161,7 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
 
         // send another half of the calls without starting the cluster
         for (; i < messages.length; i++) {
-          replies.add(client.sendAsync(messages[i]));
+          replies.add(client.async().send(messages[i]));
         }
         Assert.assertEquals(messages.length, replies.size());
       }
@@ -183,7 +190,7 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
         }
       }
 
-      testFailureCaseAsync("last-request", () -> client.sendAsync(new SimpleMessage("last")),
+      testFailureCaseAsync("last-request", () -> client.async().send(new SimpleMessage("last")),
           AlreadyClosedException.class, RaftRetryFailureException.class);
     }
   }
@@ -199,47 +206,48 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
     int numMessages = RaftClientConfigKeys.Async.outstandingRequestsMax(getProperties());
     CompletableFuture[] futures = new CompletableFuture[numMessages + 1];
     final SimpleMessage[] messages = SimpleMessage.create(numMessages);
-    final RaftClient client = cluster.createClient();
-    //Set blockTransaction flag so that transaction blocks
-    cluster.getServers().stream()
-        .map(cluster::getRaftServerImpl)
-        .map(SimpleStateMachine4Testing::get)
-        .forEach(SimpleStateMachine4Testing::blockStartTransaction);
+    try (final RaftClient client = cluster.createClient()) {
+      //Set blockTransaction flag so that transaction blocks
+      StreamSupport.stream(cluster.getServers().spliterator(), false)
+          .map(cluster::getDivision)
+          .map(SimpleStateMachine4Testing::get)
+          .forEach(SimpleStateMachine4Testing::blockStartTransaction);
 
-    //Send numMessages which are blocked and do not release the client semaphore permits
-    AtomicInteger blockedRequestsCount = new AtomicInteger();
-    for (int i=0; i<numMessages; i++) {
-      blockedRequestsCount.getAndIncrement();
-      futures[i] = client.sendAsync(messages[i]);
-      blockedRequestsCount.decrementAndGet();
+      //Send numMessages which are blocked and do not release the client semaphore permits
+      AtomicInteger blockedRequestsCount = new AtomicInteger();
+      for (int i = 0; i < numMessages; i++) {
+        blockedRequestsCount.getAndIncrement();
+        futures[i] = client.async().send(messages[i]);
+        blockedRequestsCount.decrementAndGet();
+      }
+      Assert.assertEquals(0, blockedRequestsCount.get());
+
+      futures[numMessages] = CompletableFuture.supplyAsync(() -> {
+        blockedRequestsCount.incrementAndGet();
+        client.async().send(new SimpleMessage("n1"));
+        blockedRequestsCount.decrementAndGet();
+        return null;
+      });
+
+      //Allow the last msg to be sent
+      while (blockedRequestsCount.get() != 1) {
+        Thread.sleep(1000);
+      }
+      Assert.assertEquals(1, blockedRequestsCount.get());
+      //Since all semaphore permits are acquired the last message sent is in queue
+      RaftClientTestUtil.assertAsyncRequestSemaphore(client, 0, 1);
+
+      //Unset the blockTransaction flag so that semaphore permits can be released
+      StreamSupport.stream(cluster.getServers().spliterator(), false)
+          .map(cluster::getDivision)
+          .map(SimpleStateMachine4Testing::get)
+          .forEach(SimpleStateMachine4Testing::unblockStartTransaction);
+
+      for (int i = 0; i <= numMessages; i++) {
+        futures[i].join();
+      }
+      Assert.assertEquals(0, blockedRequestsCount.get());
     }
-    Assert.assertEquals(0, blockedRequestsCount.get());
-
-    futures[numMessages] = CompletableFuture.supplyAsync(() -> {
-      blockedRequestsCount.incrementAndGet();
-      client.sendAsync(new SimpleMessage("n1"));
-      blockedRequestsCount.decrementAndGet();
-      return null;
-    });
-
-    //Allow the last msg to be sent
-    while (blockedRequestsCount.get() != 1) {
-      Thread.sleep(1000);
-    }
-    Assert.assertEquals(1, blockedRequestsCount.get());
-    //Since all semaphore permits are acquired the last message sent is in queue
-    RaftClientTestUtil.assertAsyncRequestSemaphore(client, 0, 1);
-
-    //Unset the blockTransaction flag so that semaphore permits can be released
-    cluster.getServers().stream()
-        .map(cluster::getRaftServerImpl)
-        .map(SimpleStateMachine4Testing::get)
-        .forEach(SimpleStateMachine4Testing::unblockStartTransaction);
-
-    for(int i=0; i<=numMessages; i++){
-      futures[i].join();
-    }
-    Assert.assertEquals(0, blockedRequestsCount.get());
   }
 
   void runTestBasicAppendEntriesAsync(boolean killLeader) throws Exception {
@@ -278,7 +286,7 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
       for (int i = 0; i < numMesssages; i++) {
         final String s = "" + i;
         LOG.info("sendAsync " + s);
-        futures.add(client.sendAsync(new SimpleMessage(s)));
+        futures.add(client.async().send(new SimpleMessage(s)));
       }
       Assert.assertEquals(numMesssages, futures.size());
       final List<RaftClientReply> replies = new ArrayList<>();
@@ -304,7 +312,7 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
 
       // test a failure case
       testFailureCaseAsync("sendStaleReadAsync(..) with a larger commit index",
-          () -> client.sendStaleReadAsync(
+          () -> client.async().sendStaleRead(
               new SimpleMessage("" + Long.MAX_VALUE),
               followerCommitInfo.getCommitIndex(), follower),
           StateMachineException.class, IndexOutOfBoundsException.class);
@@ -315,12 +323,12 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
         final String query = "" + i;
         LOG.info("query=" + query + ", reply=" + reply);
         final Message message = new SimpleMessage(query);
-        final CompletableFuture<RaftClientReply> readFuture = client.sendReadOnlyAsync(message);
+        final CompletableFuture<RaftClientReply> readFuture = client.async().sendReadOnly(message);
 
         futures.add(readFuture.thenCompose(r -> {
           if (reply.getLogIndex() <= followerCommitIndex) {
             LOG.info("sendStaleReadAsync, query=" + query);
-            return client.sendStaleReadAsync(message, followerCommitIndex, follower);
+            return client.async().sendStaleRead(message, followerCommitIndex, follower);
           } else {
             return CompletableFuture.completedFuture(null);
           }
@@ -379,17 +387,17 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
     try (final RaftClient client = cluster.createClient()) {
       // block append requests
       cluster.getServerAliveStream()
-          .filter(impl -> !impl.isLeader())
+          .filter(impl -> !impl.getInfo().isLeader())
           .map(SimpleStateMachine4Testing::get)
           .forEach(SimpleStateMachine4Testing::blockWriteStateMachineData);
 
-      CompletableFuture<RaftClientReply> replyFuture = client.sendAsync(new SimpleMessage("abc"));
+      CompletableFuture<RaftClientReply> replyFuture = client.async().send(new SimpleMessage("abc"));
       Thread.sleep(waitTime);
       // replyFuture should not be completed until append request is unblocked.
       Assert.assertFalse(replyFuture.isDone());
       // unblock append request.
       cluster.getServerAliveStream()
-          .filter(impl -> !impl.isLeader())
+          .filter(impl -> !impl.getInfo().isLeader())
           .map(SimpleStateMachine4Testing::get)
           .forEach(SimpleStateMachine4Testing::unblockWriteStateMachineData);
 
@@ -402,6 +410,52 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
   }
 
   @Test
+  public void testCheckLeadershipFailure() throws Exception {
+    runWithNewCluster(NUM_SERVERS, this::runTestCheckLeadershipFailure);
+  }
+
+  void runTestCheckLeadershipFailure(CLUSTER cluster) throws Exception {
+    LOG.info("Running testCheckLeadershipFailure");
+
+    waitForLeader(cluster);
+    final RaftServer.Division prevLeader = cluster.getLeader();
+    final long termOfPrevLeader = prevLeader.getInfo().getCurrentTerm();
+    LOG.info("Previous Leader is elected on term {}", termOfPrevLeader);
+
+    try (final RaftClient client = cluster.createClient()) {
+      // block append entries request
+      cluster.getServerAliveStream()
+          .filter(impl -> !impl.getInfo().isLeader())
+          .map(SimpleStateMachine4Testing::get)
+          .forEach(peer -> logSyncDelay.setDelayMs(peer.getId().toString(), 1000));
+
+      // trigger append entries request
+      client.async().send(new SimpleMessage("abc"));
+
+      // default max election timeout is 300ms, 1s is long enough to
+      // trigger failure of LeaderState::checkLeadership()
+      Thread.sleep(1000);
+
+      // previous leader should not there.
+      cluster.getServerAliveStream()
+          .map(RaftServer.Division::getInfo)
+          .forEach(info -> Assert.assertTrue(!info.isLeader() || info.getCurrentTerm() > termOfPrevLeader));
+
+    } finally {
+      // unblock append entries request
+      logSyncDelay.clear();
+    }
+
+    waitForLeader(cluster);
+    final RaftServer.Division currLeader = cluster.getLeader();
+    final long termOfCurrLeader = currLeader.getInfo().getCurrentTerm();
+    LOG.info("Current Leader is elected on term {}", termOfCurrLeader);
+
+    // leader on termOfPrevLeader should step-down.
+    Assert.assertTrue(termOfPrevLeader < termOfCurrLeader);
+  }
+
+  @Test
   public void testNoRetryWaitOnNotLeaderException() throws Exception {
     RaftClientConfigKeys.Async.Experimental.setSendDummyRequest(getProperties(), false);
     runWithNewCluster(3, this::runTestNoRetryWaitOnNotLeaderException);
@@ -409,8 +463,8 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
   }
 
   private void runTestNoRetryWaitOnNotLeaderException(MiniRaftCluster cluster) throws Exception {
-    final RaftServerImpl leader = waitForLeader(cluster);
-    final List<RaftServerImpl> followers = cluster.getFollowers();
+    final RaftServer.Division leader = waitForLeader(cluster);
+    final List<RaftServer.Division> followers = cluster.getFollowers();
     Assert.assertNotNull(followers);
     Assert.assertEquals(2, followers.size());
     Assert.assertNotSame(leader, followers.get(0));
@@ -418,7 +472,7 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
 
     // send a message to make sure that the leader is ready
     try (final RaftClient client = cluster.createClient(leader.getId())) {
-      final CompletableFuture<RaftClientReply> f = client.sendAsync(new SimpleMessage("first"));
+      final CompletableFuture<RaftClientReply> f = client.async().send(new SimpleMessage("first"));
       FIVE_SECONDS.apply(f::get);
     }
 
@@ -426,7 +480,7 @@ public abstract class RaftAsyncTests<CLUSTER extends MiniRaftCluster> extends Ba
     final RetryPolicy r = event -> () -> TimeDuration.valueOf(60, TimeUnit.SECONDS);
 
     try (final RaftClient client = cluster.createClient(followers.get(0).getId(), cluster.getGroup(), r)) {
-      final CompletableFuture<RaftClientReply> f = client.sendAsync(new SimpleMessage("abc"));
+      final CompletableFuture<RaftClientReply> f = client.async().send(new SimpleMessage("abc"));
       FIVE_SECONDS.apply(f::get);
     } catch (TimeoutException e) {
       throw new AssertionError("Failed to get async result", e);

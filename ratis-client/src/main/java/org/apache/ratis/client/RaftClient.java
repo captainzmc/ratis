@@ -18,7 +18,12 @@
 package org.apache.ratis.client;
 
 import org.apache.ratis.RaftConfigKeys;
-import org.apache.ratis.client.api.StreamApi;
+import org.apache.ratis.client.api.AdminApi;
+import org.apache.ratis.client.api.AsyncApi;
+import org.apache.ratis.client.api.BlockingApi;
+import org.apache.ratis.client.api.DataStreamApi;
+import org.apache.ratis.client.api.GroupManagementApi;
+import org.apache.ratis.client.api.MessageStreamApi;
 import org.apache.ratis.client.impl.ClientImplUtils;
 import org.apache.ratis.conf.Parameters;
 import org.apache.ratis.conf.RaftProperties;
@@ -26,14 +31,12 @@ import org.apache.ratis.protocol.*;
 import org.apache.ratis.retry.RetryPolicies;
 import org.apache.ratis.retry.RetryPolicy;
 import org.apache.ratis.rpc.RpcType;
-import org.apache.ratis.proto.RaftProtos.ReplicationLevel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
-import java.io.IOException;
+import java.util.Collection;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
 
 /** A client who sends requests to a raft service. */
 public interface RaftClient extends Closeable {
@@ -42,63 +45,29 @@ public interface RaftClient extends Closeable {
   /** @return the id of this client. */
   ClientId getId();
 
-  /** @return the client rpct. */
+  /** @return the cluster leaderId recorded by this client. */
+  RaftPeerId getLeaderId();
+
+  /** @return the {@link RaftClientRpc}. */
   RaftClientRpc getClientRpc();
 
-  StreamApi getStreamApi();
+  /** @return the {@link AdminApi}. */
+  AdminApi admin();
 
-  /**
-   * Async call to send the given message to the raft service.
-   * The message may change the state of the service.
-   * For readonly messages, use {@link #sendReadOnlyAsync(Message)} instead.
-   *
-   * @param message The request message.
-   * @return a future of the reply.
-   */
-  CompletableFuture<RaftClientReply> sendAsync(Message message);
+  /** Get the {@link GroupManagementApi} for the given server. */
+  GroupManagementApi getGroupManagementApi(RaftPeerId server);
 
-  /** Async call to send the given readonly message to the raft service. */
-  CompletableFuture<RaftClientReply> sendReadOnlyAsync(Message message);
+  /** @return the {@link BlockingApi}. */
+  BlockingApi io();
 
-  /** Async call to send the given stale-read message to the given server (not the raft service). */
-  CompletableFuture<RaftClientReply> sendStaleReadAsync(Message message, long minIndex, RaftPeerId server);
+  /** Get the {@link AsyncApi}. */
+  AsyncApi async();
 
-  /** Async call to watch the given index to satisfy the given replication level. */
-  CompletableFuture<RaftClientReply> sendWatchAsync(long index, ReplicationLevel replication);
+  /** @return the {@link MessageStreamApi}. */
+  MessageStreamApi getMessageStreamApi();
 
-  /**
-   * Send the given message to the raft service.
-   * The message may change the state of the service.
-   * For readonly messages, use {@link #sendReadOnly(Message)} instead.
-   *
-   * @param message The request message.
-   * @return the reply.
-   */
-  RaftClientReply send(Message message) throws IOException;
-
-  /** Send the given readonly message to the raft service. */
-  RaftClientReply sendReadOnly(Message message) throws IOException;
-
-  /** Send the given stale-read message to the given server (not the raft service). */
-  RaftClientReply sendStaleRead(Message message, long minIndex, RaftPeerId server) throws IOException;
-
-  /** Watch the given index to satisfy the given replication level. */
-  RaftClientReply sendWatch(long index, ReplicationLevel replication) throws IOException;
-
-  /** Send set configuration request to the raft service. */
-  RaftClientReply setConfiguration(RaftPeer[] serversInNewConf) throws IOException;
-
-  /** Send groupAdd request to the given server (not the raft service). */
-  RaftClientReply groupAdd(RaftGroup newGroup, RaftPeerId server) throws IOException;
-
-  /** Send groupRemove request to the given server (not the raft service). */
-  RaftClientReply groupRemove(RaftGroupId groupId, boolean deleteDirectory, RaftPeerId server) throws IOException;
-
-  /** Send getGroupList request to the given server.*/
-  GroupListReply getGroupList(RaftPeerId server) throws IOException;
-
-  /** Send getGroupInfo request to the given server.*/
-  GroupInfoReply getGroupInfo(RaftGroupId group, RaftPeerId server) throws IOException;
+  /** @return the {@link DataStreamApi}. */
+  DataStreamApi getDataStreamApi();
 
   /** @return a {@link Builder}. */
   static Builder newBuilder() {
@@ -111,6 +80,7 @@ public interface RaftClient extends Closeable {
     private RaftClientRpc clientRpc;
     private RaftGroup group;
     private RaftPeerId leaderId;
+    private RaftPeer primaryDataStreamServer;
     private RaftProperties properties;
     private Parameters parameters;
     private RetryPolicy retryPolicy = RetryPolicies.retryForeverNoSleep();
@@ -129,9 +99,14 @@ public interface RaftClient extends Closeable {
           clientRpc = factory.newRaftClientRpc(clientId, properties);
         }
       }
-      return ClientImplUtils.newRaftClient(clientId,
-          Objects.requireNonNull(group, "The 'group' field is not initialized."),
-          leaderId,
+      Objects.requireNonNull(group, "The 'group' field is not initialized.");
+      if (primaryDataStreamServer == null) {
+        final Collection<RaftPeer> peers = group.getPeers();
+        if (!peers.isEmpty()) {
+          primaryDataStreamServer = peers.iterator().next();
+        }
+      }
+      return ClientImplUtils.newRaftClient(clientId, group, leaderId, primaryDataStreamServer,
           Objects.requireNonNull(clientRpc, "The 'clientRpc' field is not initialized."),
           properties, retryPolicy);
     }
@@ -151,6 +126,12 @@ public interface RaftClient extends Closeable {
     /** Set leader ID. */
     public Builder setLeaderId(RaftPeerId leaderId) {
       this.leaderId = leaderId;
+      return this;
+    }
+
+    /** Set primary server of DataStream. */
+    public Builder setPrimaryDataStreamServer(RaftPeer primaryDataStreamServer) {
+      this.primaryDataStreamServer = primaryDataStreamServer;
       return this;
     }
 

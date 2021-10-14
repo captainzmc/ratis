@@ -17,14 +17,8 @@
  */
 package org.apache.ratis.hadooprpc;
 
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.ipc.Client;
-import org.apache.log4j.Level;
-import org.apache.ratis.MiniRaftCluster;
 import org.apache.ratis.server.impl.RaftReconfigurationBaseTest;
-
-import java.io.IOException;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_TIMEOUT_KEY;
@@ -32,9 +26,6 @@ import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IPC_CLIENT_CONN
 public class TestRaftReconfigurationWithHadoopRpc
     extends RaftReconfigurationBaseTest<MiniRaftClusterWithHadoopRpc>
     implements MiniRaftClusterWithHadoopRpc.Factory.Get {
-  static {
-    ((Log4JLogger) Client.LOG).getLogger().setLevel(Level.ERROR);
-  }
 
   @Override
   public MiniRaftClusterWithHadoopRpc newCluster(int numPeers) {

@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -17,6 +17,8 @@
  */
 package org.apache.ratis.server.impl;
 
+import org.apache.ratis.server.RaftConfiguration;
+import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.Preconditions;
 import org.apache.ratis.util.StringUtils;
 
@@ -29,32 +31,37 @@ import java.util.*;
  * entries.
  */
 public class ConfigurationManager {
-  private final RaftConfiguration initialConf;
-  private final NavigableMap<Long, RaftConfiguration> configurations = new TreeMap<>();
+  private final RaftConfigurationImpl initialConf;
+  private final NavigableMap<Long, RaftConfigurationImpl> configurations = new TreeMap<>();
   /**
    * The current raft configuration. If configurations is not empty, should be
    * the last entry of the map. Otherwise is initialConf.
    */
-  private RaftConfiguration currentConf;
+  private volatile RaftConfigurationImpl currentConf;
 
-  ConfigurationManager(RaftConfiguration initialConf) {
+  ConfigurationManager(RaftConfigurationImpl initialConf) {
     this.initialConf = initialConf;
     this.currentConf = initialConf;
   }
 
-  synchronized void addConfiguration(long logIndex, RaftConfiguration conf) {
+  synchronized void addConfiguration(RaftConfiguration conf) {
+    final long logIndex = conf.getLogEntryIndex();
     final RaftConfiguration found = configurations.get(logIndex);
     if (found != null) {
       Preconditions.assertTrue(found.equals(conf));
       return;
     }
+    addRaftConfigurationImpl(logIndex, (RaftConfigurationImpl) conf);
+  }
+
+  private void addRaftConfigurationImpl(long logIndex, RaftConfigurationImpl conf) {
     configurations.put(logIndex, conf);
     if (logIndex == configurations.lastEntry().getKey()) {
       currentConf = conf;
     }
   }
 
-  synchronized RaftConfiguration getCurrent() {
+  RaftConfigurationImpl getCurrent() {
     return currentConf;
   }
 
@@ -65,9 +72,8 @@ public class ConfigurationManager {
    * @return The configuration with largest log index < the given index.
    */
   synchronized RaftConfiguration removeConfigurations(long index) {
-    SortedMap<Long, RaftConfiguration> toRemove = configurations.tailMap(index);
-    for (Iterator<Map.Entry<Long, RaftConfiguration>> iter =
-         toRemove.entrySet().iterator(); iter.hasNext();) {
+    // remove all configurations starting at the index
+    for(final Iterator<?> iter = configurations.tailMap(index).entrySet().iterator(); iter.hasNext();) {
       iter.next();
       iter.remove();
     }
@@ -82,7 +88,9 @@ public class ConfigurationManager {
 
   @Override
   public synchronized String toString() {
-    return getClass().getSimpleName() + ", init=" + initialConf + ", confs=" + StringUtils.map2String(configurations);
+    return JavaUtils.getClassSimpleName(getClass())
+        + ", init=" + initialConf
+        + ", confs=" + StringUtils.map2String(configurations);
   }
 
   // TODO: remove Configuration entries after they are committed

@@ -115,7 +115,7 @@ public class LogServer extends BaseServer {
             RaftServerConfigKeys.setStorageDir(properties, Collections.singletonList(new File(opts.getWorkingDir())));
         }
         String id = opts.getHost() +"_" +  opts.getPort();
-        RaftPeer peer = new RaftPeer(RaftPeerId.valueOf(id), addr);
+        final RaftPeer peer = RaftPeer.newBuilder().setId(id).setAddress(addr).build();
         final RaftGroupId logServerGroupId = RaftGroupId.valueOf(opts.getLogServerGroupId());
         RaftGroup all = RaftGroup.valueOf(logServerGroupId, peer);
         RaftGroup meta = RaftGroup.valueOf(RaftGroupId.valueOf(opts.getMetaGroupId()), peers);
@@ -145,8 +145,8 @@ public class LogServer extends BaseServer {
                 .setClientId(ClientId.randomId())
                 .setProperties(properties)
                 .build();
-        metaClient.send(() -> MetaServiceProtoUtil.toPingRequestProto(peer).toByteString());
-        daemon = new Daemon(new HeartbeatSender(new RaftPeer(raftServer.getId())),
+        metaClient.io().send(() -> MetaServiceProtoUtil.toPingRequestProto(peer).toByteString());
+        daemon = new Daemon(new HeartbeatSender(RaftPeer.newBuilder().setId(raftServer.getId()).build()),
                 "heartbeat-Sender"+raftServer.getId());
         daemon.start();
     }
@@ -176,6 +176,7 @@ public class LogServer extends BaseServer {
 
 
     public void close() throws IOException {
+        metaClient.close();
         raftServer.close();
         daemon.interrupt();
     }
@@ -199,7 +200,7 @@ public class LogServer extends BaseServer {
 
             while (true) {
                 try {
-                    metaClient.send(() -> MetaServiceProtoUtil.
+                    metaClient.io().send(() -> MetaServiceProtoUtil.
                             toHeartbeatRequestProto(peer).toByteString());
                     Thread.sleep(heartbeatInterval);
                 } catch (InterruptedException e) {

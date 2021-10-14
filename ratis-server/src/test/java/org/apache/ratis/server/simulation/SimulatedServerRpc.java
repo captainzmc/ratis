@@ -17,12 +17,15 @@
  */
 package org.apache.ratis.server.simulation;
 
+import org.apache.ratis.proto.RaftProtos;
 import org.apache.ratis.proto.RaftProtos.AppendEntriesReplyProto;
 import org.apache.ratis.proto.RaftProtos.AppendEntriesRequestProto;
 import org.apache.ratis.proto.RaftProtos.InstallSnapshotReplyProto;
 import org.apache.ratis.proto.RaftProtos.InstallSnapshotRequestProto;
 import org.apache.ratis.proto.RaftProtos.RequestVoteReplyProto;
 import org.apache.ratis.proto.RaftProtos.RequestVoteRequestProto;
+import org.apache.ratis.proto.RaftProtos.StartLeaderElectionReplyProto;
+import org.apache.ratis.proto.RaftProtos.StartLeaderElectionRequestProto;
 import org.apache.ratis.protocol.GroupInfoRequest;
 import org.apache.ratis.protocol.GroupListRequest;
 import org.apache.ratis.protocol.GroupManagementRequest;
@@ -31,9 +34,9 @@ import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.apache.ratis.protocol.SetConfigurationRequest;
+import org.apache.ratis.protocol.TransferLeadershipRequest;
 import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerRpc;
-import org.apache.ratis.server.impl.RaftServerProxy;
 import org.apache.ratis.util.Daemon;
 import org.apache.ratis.util.IOUtils;
 import org.apache.ratis.util.JavaUtils;
@@ -42,6 +45,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.util.Collection;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -51,7 +55,7 @@ import java.util.function.Supplier;
 class SimulatedServerRpc implements RaftServerRpc {
   static final Logger LOG = LoggerFactory.getLogger(SimulatedServerRpc.class);
 
-  private final RaftServerProxy server;
+  private final RaftServer server;
   private final RequestHandler<RaftServerRequest, RaftServerReply> serverHandler;
   private final RequestHandler<RaftClientRequest, RaftClientReply> clientHandler;
   private final ExecutorService executor = Executors.newFixedThreadPool(3, Daemon::new);
@@ -59,7 +63,7 @@ class SimulatedServerRpc implements RaftServerRpc {
   SimulatedServerRpc(RaftServer server,
       SimulatedRequestReply<RaftServerRequest, RaftServerReply> serverRequestReply,
       SimulatedRequestReply<RaftClientRequest, RaftClientReply> clientRequestReply) {
-    this.server = (RaftServerProxy)server;
+    this.server = server;
 
     final Supplier<String> id = () -> server.getId().toString();
     this.serverHandler = new RequestHandler<>(id, "serverHandler", serverRequestReply, serverHandlerImpl, 3);
@@ -89,6 +93,7 @@ class SimulatedServerRpc implements RaftServerRpc {
       executor.shutdown();
       executor.awaitTermination(1000, TimeUnit.MILLISECONDS);
     } catch (InterruptedException ignored) {
+      Thread.currentThread().interrupt();
     }
     clientHandler.shutdown();
     serverHandler.shutdown();
@@ -124,7 +129,14 @@ class SimulatedServerRpc implements RaftServerRpc {
   }
 
   @Override
-  public void addPeers(Iterable<RaftPeer> peers) {
+  public StartLeaderElectionReplyProto startLeaderElection(StartLeaderElectionRequestProto request)
+      throws IOException {
+    RaftServerReply reply = serverHandler.getRpc().sendRequest(new RaftServerRequest(request));
+    return reply.getStartLeaderElection();
+  }
+
+  @Override
+  public void addRaftPeers(Collection<RaftPeer> peers) {
     // do nothing
   }
 
@@ -149,6 +161,8 @@ class SimulatedServerRpc implements RaftServerRpc {
         return new RaftServerReply(server.requestVote(r.getRequestVote()));
       } else if (r.isInstallSnapshot()) {
         return new RaftServerReply(server.installSnapshot(r.getInstallSnapshot()));
+      } else if (r.isStartLeaderElection()) {
+        return new RaftServerReply(server.startLeaderElection(r.getStartLeaderElection()));
       } else {
         throw new IllegalStateException("unexpected state");
       }
@@ -177,6 +191,8 @@ class SimulatedServerRpc implements RaftServerRpc {
             server.getGroupInfo((GroupInfoRequest) request));
       } else if (request instanceof SetConfigurationRequest) {
         future = server.setConfigurationAsync((SetConfigurationRequest) request);
+      } else if (request instanceof TransferLeadershipRequest) {
+        future = server.transferLeadershipAsync((TransferLeadershipRequest) request);
       } else {
         future = server.submitClientRequestAsync(request);
       }

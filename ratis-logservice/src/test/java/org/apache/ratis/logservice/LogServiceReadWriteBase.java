@@ -34,7 +34,7 @@ import java.util.List;
 import javax.management.ObjectName;
 
 import org.apache.ratis.BaseTest;
-import org.apache.ratis.MiniRaftCluster;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.RaftTestUtil;
 import org.apache.ratis.client.RaftClient;
 import org.apache.ratis.conf.RaftProperties;
@@ -44,7 +44,7 @@ import org.apache.ratis.logservice.api.LogStream;
 import org.apache.ratis.logservice.api.LogStream.State;
 import org.apache.ratis.logservice.api.LogWriter;
 import org.apache.ratis.logservice.impl.LogStreamImpl;
-import org.apache.ratis.logservice.metrics.LogServiceMetricsRegistry;
+import org.apache.ratis.logservice.metrics.LogServiceMetrics;
 import org.apache.ratis.logservice.server.LogStateMachine;
 import org.apache.ratis.logservice.util.TestUtils;
 import org.apache.ratis.metrics.JVMMetrics;
@@ -125,12 +125,12 @@ public abstract class LogServiceReadWriteBase<CLUSTER extends MiniRaftCluster>
 
   @Test
   public void testLogServiceReadWrite() throws Exception {
-    RaftClient raftClient =
-        RaftClient.newBuilder().setProperties(getProperties()).setRaftGroup(cluster.getGroup())
-            .build();
-    LogName logName = LogName.of("log1");
-    // TODO need API to circumvent metadata service for testing
-    try (LogStream logStream = new MetricLogStream(logName, raftClient)) {
+    try (RaftClient raftClient =
+        RaftClient.newBuilder().setProperties(getProperties())
+            .setRaftGroup(cluster.getGroup()).build()) {
+      LogName logName = LogName.of("log1");
+      // TODO need API to circumvent metadata service for testing
+      LogStream logStream = new MetricLogStream(logName, raftClient);
       assertEquals("log1", logStream.getName().getName());
       assertEquals(State.OPEN, logStream.getState());
       assertEquals(0, logStream.getSize());
@@ -181,13 +181,13 @@ public abstract class LogServiceReadWriteBase<CLUSTER extends MiniRaftCluster>
 
   @Test
   public void testReadAllRecords() throws Exception {
-    final RaftClient raftClient =
-        RaftClient.newBuilder().setProperties(getProperties()).setRaftGroup(cluster.getGroup())
-            .build();
-    final LogName logName = LogName.of("log1");
-    final int numRecords = 25;
-    // TODO need API to circumvent metadata service for testing
-    try (LogStream logStream = new MetricLogStream(logName, raftClient)) {
+    try (RaftClient raftClient =
+        RaftClient.newBuilder().setProperties(getProperties())
+            .setRaftGroup(cluster.getGroup()).build()) {
+      final LogName logName = LogName.of("log1");
+      final int numRecords = 25;
+      // TODO need API to circumvent metadata service for testing
+      LogStream logStream = new MetricLogStream(logName, raftClient);
       try (LogWriter writer = logStream.createWriter()) {
         LOG.info("Writing {} records", numRecords);
         // Write records 0 through 99 (inclusive)
@@ -222,13 +222,13 @@ public abstract class LogServiceReadWriteBase<CLUSTER extends MiniRaftCluster>
 
   @Test
   public void testSeeking() throws Exception {
-    final RaftClient raftClient =
-        RaftClient.newBuilder().setProperties(getProperties()).setRaftGroup(cluster.getGroup())
-            .build();
-    final LogName logName = LogName.of("log1");
-    final int numRecords = 100;
-    // TODO need API to circumvent metadata service for testing
-    try (LogStream logStream = new MetricLogStream(logName, raftClient)) {
+    try (final RaftClient raftClient =
+        RaftClient.newBuilder().setProperties(getProperties())
+            .setRaftGroup(cluster.getGroup()).build()) {
+      final LogName logName = LogName.of("log1");
+      final int numRecords = 100;
+      // TODO need API to circumvent metadata service for testing
+      LogStream logStream = new MetricLogStream(logName, raftClient);
       try (LogWriter writer = logStream.createWriter()) {
         LOG.info("Writing {} records", numRecords);
         // Write records 0 through 99 (inclusive)
@@ -259,12 +259,12 @@ public abstract class LogServiceReadWriteBase<CLUSTER extends MiniRaftCluster>
 
   @Test
   public void testSeekFromWrite() throws Exception {
-    final RaftClient raftClient =
-        RaftClient.newBuilder().setProperties(getProperties()).setRaftGroup(cluster.getGroup())
-            .build();
-    final LogName logName = LogName.of("log1");
-    final int numRecords = 10;
-    try (LogStream logStream = new MetricLogStream(logName, raftClient)) {
+    try (final RaftClient raftClient =
+        RaftClient.newBuilder().setProperties(getProperties())
+            .setRaftGroup(cluster.getGroup()).build()) {
+      final LogName logName = LogName.of("log1");
+      final int numRecords = 10;
+      LogStream logStream = new MetricLogStream(logName, raftClient);
       final List<Long> recordIds;
       try (LogWriter writer = logStream.createWriter()) {
         LOG.info("Writing {} records", numRecords);
@@ -324,10 +324,9 @@ public abstract class LogServiceReadWriteBase<CLUSTER extends MiniRaftCluster>
   }
 
   private Long getJMXCount(String groupId, String metricName) throws Exception {
-    ObjectName oname = new ObjectName(LogServiceMetricsRegistry.RATIS_LOG_SERVICE_METRICS, "name",
-        LogServiceMetricsRegistry
-            .getMetricRegistryForLogService(groupId, cluster.getLeader().getId().toString())
-            .getMetricRegistryInfo().getName() + "." + metricName);
+    ObjectName oname = new ObjectName(LogServiceMetrics.RATIS_LOG_SERVICE_METRICS, "name",
+        new LogServiceMetrics(groupId, cluster.getLeader().getId().toString())
+            .getRegistry().getMetricRegistryInfo().getName() + "." + metricName);
     return (Long) ManagementFactory.getPlatformMBeanServer().getAttribute(oname, "Count");
   }
 }

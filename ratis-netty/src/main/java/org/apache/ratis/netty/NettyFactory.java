@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -25,9 +25,9 @@ import org.apache.ratis.netty.server.NettyRpcService;
 import org.apache.ratis.protocol.ClientId;
 import org.apache.ratis.rpc.SupportedRpcType;
 import org.apache.ratis.server.RaftServer;
-import org.apache.ratis.server.impl.ServerFactory;
+import org.apache.ratis.server.ServerFactory;
 
-public class NettyFactory extends ServerFactory.BaseFactory implements ClientFactory {
+public class NettyFactory implements ServerFactory, ClientFactory {
   public NettyFactory(Parameters parameters) {}
 
   @Override

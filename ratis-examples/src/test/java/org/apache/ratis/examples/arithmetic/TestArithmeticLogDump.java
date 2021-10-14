@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -23,13 +23,13 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.log4j.Level;
 import org.apache.ratis.BaseTest;
-import org.apache.ratis.MiniRaftCluster;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.RaftTestUtil;
 import org.apache.ratis.conf.RaftProperties;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerImpl;
+import org.apache.ratis.server.raftlog.segmented.LogSegmentPath;
 import org.apache.ratis.server.simulation.MiniRaftClusterWithSimulatedRpc;
-import org.apache.ratis.server.storage.RaftStorageDirectory;
 import org.apache.ratis.statemachine.SimpleStateMachine4Testing;
 import org.apache.ratis.statemachine.StateMachine;
 import org.apache.ratis.tools.ParseRatisLog;
@@ -42,7 +42,7 @@ import org.junit.Test;
 
 public class TestArithmeticLogDump extends BaseTest {
   static {
-    Log4jUtils.setLogLevel(RaftServerImpl.LOG, Level.DEBUG);
+    Log4jUtils.setLogLevel(RaftServer.Division.LOG, Level.DEBUG);
   }
 
   public static final int NUM_SERVERS = 1;
@@ -75,9 +75,8 @@ public class TestArithmeticLogDump extends BaseTest {
 
   @Test
   public void testLogDump() throws Exception {
-    RaftServerImpl leaderServer = RaftTestUtil.waitForLeader(cluster);
-    List<RaftStorageDirectory.LogPathAndIndex> files =
-        leaderServer.getState().getStorage().getStorageDir().getLogSegmentFiles();
+    final RaftServer.Division leaderServer = RaftTestUtil.waitForLeader(cluster);
+    final List<LogSegmentPath> files = LogSegmentPath.getLogSegmentPaths(leaderServer.getRaftStorage());
     Assert.assertEquals(1, files.size());
     cluster.shutdown();
 

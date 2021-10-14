@@ -28,21 +28,23 @@ import org.apache.ratis.metrics.RatisMetricRegistry;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto.LogEntryBodyCase;
 import org.apache.ratis.protocol.RaftPeerId;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.LogAppender;
-import org.apache.ratis.server.impl.RaftServerImpl;
-import org.apache.ratis.server.impl.RaftServerMetrics;
-import org.apache.ratis.server.impl.ServerProtoUtils;
-import org.apache.ratis.server.impl.ServerState;
+import org.apache.ratis.server.leader.LogAppender;
+import org.apache.ratis.server.impl.MiniRaftCluster;
+import org.apache.ratis.server.metrics.RaftServerMetricsImpl;
+import org.apache.ratis.server.raftlog.LogProtoUtils;
 import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.statemachine.SimpleStateMachine4Testing;
 import org.apache.ratis.statemachine.StateMachine;
+import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.Log4jUtils;
 import org.apache.ratis.util.SizeInBytes;
 import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.List;
@@ -51,8 +53,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import com.codahale.metrics.Gauge;
 
@@ -102,7 +102,7 @@ public abstract class LogAppenderTests<CLUSTER extends MiniRaftCluster>
       try {
         latch.await();
         for (SimpleMessage msg : messages) {
-          client.send(msg);
+          client.io().send(msg);
         }
         client.close();
         succeed.set(true);
@@ -130,26 +130,26 @@ public abstract class LogAppenderTests<CLUSTER extends MiniRaftCluster>
     // Start a 3 node Ratis ring.
     final MiniRaftCluster cluster = newCluster(3);
     cluster.start();
-    RaftServerImpl leaderServer = waitForLeader(cluster);
+    final RaftServer.Division leaderServer = waitForLeader(cluster);
 
     // Write 10 messages to leader.
     try(RaftClient client = cluster.createClient(leaderServer.getId())) {
       for (int i = 1; i <= 10; i++) {
-        client.send(new RaftTestUtil.SimpleMessage("Msg to make leader ready " +  i));
+        client.io().send(new RaftTestUtil.SimpleMessage("Msg to make leader ready " +  i));
       }
     } catch (IOException e) {
       throw e;
     }
 
-    RatisMetricRegistry ratisMetricRegistry =
-        RaftServerMetrics.getRaftServerMetrics(leaderServer).getRegistry();
+    final RatisMetricRegistry ratisMetricRegistry
+        = ((RaftServerMetricsImpl)leaderServer.getRaftServerMetrics()).getRegistry();
 
     // Get all last_heartbeat_elapsed_time metric gauges. Should be equal to number of followers.
     SortedMap<String, Gauge> heartbeatElapsedTimeGauges = ratisMetricRegistry.getGauges((s, metric) ->
         s.contains("lastHeartbeatElapsedTime"));
     assertTrue(heartbeatElapsedTimeGauges.size() == 2);
 
-    for (RaftServerImpl followerServer : cluster.getFollowers()) {
+    for (RaftServer.Division followerServer : cluster.getFollowers()) {
       String followerId = followerServer.getId().toString();
       Gauge metric = heartbeatElapsedTimeGauges.entrySet().parallelStream().filter(e -> e.getKey().contains(
           followerId)).iterator().next().getValue();
@@ -158,7 +158,7 @@ public abstract class LogAppenderTests<CLUSTER extends MiniRaftCluster>
       // Metric in nanos > 0.
       assertTrue((long)metric.getValue() > 0);
       // Try to get Heartbeat metrics for follower.
-      RaftServerMetrics followerMetrics = RaftServerMetrics.getRaftServerMetrics(followerServer);
+      final RaftServerMetricsImpl followerMetrics = (RaftServerMetricsImpl) followerServer.getRaftServerMetrics();
       // Metric should not exist. It only exists in leader.
       assertTrue(followerMetrics.getRegistry().getGauges((s, m) -> s.contains("lastHeartbeatElapsedTime")).isEmpty());
       for (boolean heartbeat : new boolean[] { true, false }) {
@@ -172,34 +172,51 @@ public abstract class LogAppenderTests<CLUSTER extends MiniRaftCluster>
     final int numMsgs = 10;
     final int numClients = 5;
     final RaftPeerId leaderId = RaftTestUtil.waitForLeader(cluster).getId();
+    List<RaftClient> clients = new ArrayList<>();
 
-    // start several clients and write concurrently
-    final CountDownLatch latch = new CountDownLatch(1);
-    final List<Sender> senders = Stream.iterate(0, i -> i+1).limit(numClients)
-        .map(i -> new Sender(cluster.createClient(leaderId), numMsgs, latch))
-        .collect(Collectors.toList());
-    senders.forEach(Thread::start);
+    try {
+      List<Sender> senders = new ArrayList<>();
 
-    latch.countDown();
+      // start several clients and write concurrently
+      final CountDownLatch latch = new CountDownLatch(1);
 
-    for (Sender s : senders) {
-      s.join();
-      final Exception e = s.exception.get();
-      if (e != null) {
-        throw e;
+      for (int i = 0; i < numClients; i ++) {
+        RaftClient client = cluster.createClient(leaderId);
+        clients.add(client);
+        senders.add(new Sender(client, numMsgs, latch));
       }
-      Assert.assertTrue(s.succeed.get());
+
+      senders.forEach(Thread::start);
+
+      latch.countDown();
+
+      for (Sender s : senders) {
+        s.join();
+        final Exception e = s.exception.get();
+        if (e != null) {
+          throw e;
+        }
+        Assert.assertTrue(s.succeed.get());
+      }
+    } finally {
+      for (int i = 0; i < clients.size(); i ++) {
+        try {
+          clients.get(i).close();
+        } catch (Exception ignored) {
+          LOG.warn("{} is ignored", JavaUtils.getClassSimpleName(ignored.getClass()), ignored);
+        }
+      }
     }
 
-    final ServerState leaderState = cluster.getLeader().getState();
-    final RaftLog leaderLog = leaderState.getLog();
+    final RaftServer.Division leader = cluster.getLeader();
+    final RaftLog leaderLog = cluster.getLeader().getRaftLog();
     final EnumMap<LogEntryBodyCase, AtomicLong> counts = RaftTestUtil.countEntries(leaderLog);
     LOG.info("counts = " + counts);
     Assert.assertEquals(6 * numMsgs * numClients, counts.get(LogEntryBodyCase.STATEMACHINELOGENTRY).get());
 
     final LogEntryProto last = RaftTestUtil.getLastEntry(LogEntryBodyCase.STATEMACHINELOGENTRY, leaderLog);
-    LOG.info("last = " + ServerProtoUtils.toLogEntryString(last));
+    LOG.info("last = {}", LogProtoUtils.toLogEntryString(last));
     Assert.assertNotNull(last);
-    Assert.assertTrue(last.getIndex() <= leaderState.getLastAppliedIndex());
+    Assert.assertTrue(last.getIndex() <= leader.getInfo().getLastAppliedIndex());
   }
 }

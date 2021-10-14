@@ -18,6 +18,15 @@
 package org.apache.ratis.protocol;
 
 import org.apache.ratis.proto.RaftProtos.CommitInfoProto;
+import org.apache.ratis.protocol.exceptions.AlreadyClosedException;
+import org.apache.ratis.protocol.exceptions.DataStreamException;
+import org.apache.ratis.protocol.exceptions.LeaderNotReadyException;
+import org.apache.ratis.protocol.exceptions.LeaderSteppingDownException;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
+import org.apache.ratis.protocol.exceptions.NotReplicatedException;
+import org.apache.ratis.protocol.exceptions.RaftException;
+import org.apache.ratis.protocol.exceptions.StateMachineException;
+import org.apache.ratis.protocol.exceptions.TransferLeadershipException;
 import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.Preconditions;
 import org.apache.ratis.util.ProtoUtils;
@@ -30,8 +39,99 @@ import java.util.Collections;
  * Reply from server to client
  */
 public class RaftClientReply extends RaftClientMessage {
+  /**
+   * To build {@link RaftClientReply}
+   */
+  public static class Builder {
+    private ClientId clientId;
+    private RaftPeerId serverId;
+    private RaftGroupId groupId;
+    private long callId;
+
+    private boolean success;
+    private Message message;
+    private RaftException exception;
+
+    private long logIndex;
+    private Collection<CommitInfoProto> commitInfos;
+
+    public RaftClientReply build() {
+      return new RaftClientReply(clientId, serverId, groupId, callId,
+          success, message, exception, logIndex, commitInfos);
+    }
+
+    public Builder setClientId(ClientId clientId) {
+      this.clientId = clientId;
+      return this;
+    }
+
+    public Builder setServerId(RaftPeerId serverId) {
+      this.serverId = serverId;
+      return this;
+    }
+
+    public Builder setGroupId(RaftGroupId groupId) {
+      this.groupId = groupId;
+      return this;
+    }
+
+    public Builder setCallId(long callId) {
+      this.callId = callId;
+      return this;
+    }
+
+    public Builder setSuccess(boolean success) {
+      this.success = success;
+      return this;
+    }
+
+    public Builder setSuccess() {
+      return setSuccess(true);
+    }
+
+    public Builder setException(RaftException exception) {
+      this.exception = exception;
+      return this;
+    }
+
+    public Builder setMessage(Message message) {
+      this.message = message;
+      return this;
+    }
+
+    public Builder setLogIndex(long logIndex) {
+      this.logIndex = logIndex;
+      return this;
+    }
+
+    public Builder setCommitInfos(Collection<CommitInfoProto> commitInfos) {
+      this.commitInfos = commitInfos;
+      return this;
+    }
+
+    public Builder setServerId(RaftGroupMemberId serverId) {
+      return setServerId(serverId.getPeerId())
+          .setGroupId(serverId.getGroupId());
+    }
+
+    public Builder setClientInvocationId(ClientInvocationId invocationId) {
+      return setClientId(invocationId.getClientId())
+          .setCallId(invocationId.getLongId());
+    }
+
+    public Builder setRequest(RaftClientRequest request) {
+      return setClientId(request.getClientId())
+          .setServerId(request.getServerId())
+          .setGroupId(request.getRaftGroupId())
+          .setCallId(request.getCallId());
+    }
+  }
+
+  public static Builder newBuilder() {
+    return new Builder();
+  }
+
   private final boolean success;
-  private final long callId;
 
   /**
    * We mainly track two types of exceptions here:
@@ -52,21 +152,11 @@ public class RaftClientReply extends RaftClientMessage {
   private final Collection<CommitInfoProto> commitInfos;
 
   @SuppressWarnings("parameternumber")
-  public RaftClientReply(ClientId clientId, RaftGroupMemberId serverId,
+  RaftClientReply(ClientId clientId, RaftPeerId serverId, RaftGroupId groupId,
       long callId, boolean success, Message message, RaftException exception,
       long logIndex, Collection<CommitInfoProto> commitInfos) {
-    this(clientId, serverId.getPeerId(), serverId.getGroupId(),
-        callId, success, message, exception, logIndex, commitInfos);
-  }
-
-  @SuppressWarnings("parameternumber")
-  public RaftClientReply(
-      ClientId clientId, RaftPeerId serverId, RaftGroupId groupId,
-      long callId, boolean success, Message message, RaftException exception,
-      long logIndex, Collection<CommitInfoProto> commitInfos) {
-    super(clientId, serverId, groupId);
+    super(clientId, serverId, groupId, callId);
     this.success = success;
-    this.callId = callId;
     this.message = message;
     this.exception = exception;
     this.logIndex = logIndex;
@@ -78,29 +168,10 @@ public class RaftClientReply extends RaftClientMessage {
       Preconditions.assertTrue(ReflectionUtils.isInstance(exception,
           AlreadyClosedException.class,
           NotLeaderException.class, NotReplicatedException.class,
-          LeaderNotReadyException.class, StateMachineException.class),
+          LeaderNotReadyException.class, StateMachineException.class, DataStreamException.class,
+          LeaderSteppingDownException.class, TransferLeadershipException.class),
           () -> "Unexpected exception class: " + this);
     }
-  }
-
-  public RaftClientReply(RaftClientRequest request, RaftException exception, Collection<CommitInfoProto> commitInfos) {
-    this(request.getClientId(), request.getServerId(), request.getRaftGroupId(),
-        request.getCallId(), false, null, exception, 0L, commitInfos);
-  }
-
-  public RaftClientReply(RaftClientRequest request, Collection<CommitInfoProto> commitInfos) {
-    this(request, (Message) null, commitInfos);
-  }
-
-  public RaftClientReply(RaftClientRequest request, Message message, Collection<CommitInfoProto> commitInfos) {
-    this(request.getClientId(), request.getServerId(), request.getRaftGroupId(),
-        request.getCallId(), true, message, null, 0L, commitInfos);
-  }
-
-  public RaftClientReply(RaftClientRequest request, NotReplicatedException nre,
-      Collection<CommitInfoProto> commitInfos) {
-    this(request.getClientId(), request.getServerId(), request.getRaftGroupId(),
-        request.getCallId(), false, request.getMessage(), nre, nre.getLogIndex(), commitInfos);
   }
 
   /**
@@ -118,17 +189,13 @@ public class RaftClientReply extends RaftClientMessage {
     return false;
   }
 
-  public long getCallId() {
-    return callId;
-  }
-
   public long getLogIndex() {
     return logIndex;
   }
 
   @Override
   public String toString() {
-    return super.toString() + ", cid=" + getCallId() + ", "
+    return super.toString() + ", "
         + (isSuccess()? "SUCCESS":  "FAILED " + exception)
         + ", logIndex=" + getLogIndex() + ", commits" + ProtoUtils.toString(commitInfos);
   }
@@ -161,8 +228,21 @@ public class RaftClientReply extends RaftClientMessage {
     return JavaUtils.cast(exception, StateMachineException.class);
   }
 
+  /** If this reply has {@link DataStreamException}, return it; otherwise return null. */
+  public DataStreamException getDataStreamException() {
+    return JavaUtils.cast(exception, DataStreamException.class);
+  }
+
   public LeaderNotReadyException getLeaderNotReadyException() {
     return JavaUtils.cast(exception, LeaderNotReadyException.class);
+  }
+
+  public LeaderSteppingDownException getLeaderSteppingDownException() {
+    return JavaUtils.cast(exception, LeaderSteppingDownException.class);
+  }
+
+  public TransferLeadershipException getTransferLeadershipException() {
+    return JavaUtils.cast(exception, TransferLeadershipException.class);
   }
 
   /** @return the exception, if there is any; otherwise, return null. */

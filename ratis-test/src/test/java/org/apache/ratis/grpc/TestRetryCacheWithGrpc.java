@@ -17,7 +17,7 @@
  */
 package org.apache.ratis.grpc;
 
-import org.apache.ratis.MiniRaftCluster;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.RaftTestUtil;
 import org.apache.ratis.RetryCacheTests;
 import org.apache.ratis.conf.RaftProperties;
@@ -25,10 +25,9 @@ import org.apache.ratis.protocol.ClientId;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.exceptions.ResourceUnavailableException;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerImpl;
-import org.apache.ratis.server.impl.RaftServerProxy;
-import org.apache.ratis.server.impl.RaftServerTestUtil;
+import org.apache.ratis.server.impl.RetryCacheTestUtil;
 import org.apache.ratis.statemachine.SimpleStateMachine4Testing;
 import org.apache.ratis.statemachine.StateMachine;
 import org.junit.Test;
@@ -51,9 +50,9 @@ public class TestRetryCacheWithGrpc
     MiniRaftClusterWithGrpc cluster = getFactory().newCluster(NUM_SERVERS, properties);
     cluster.start();
 
-    RaftServerImpl leader = RaftTestUtil.waitForLeader(cluster);
-    RaftServerProxy leaderProxy = leader.getProxy();
-    for (RaftServerImpl follower : cluster.getFollowers()) {
+    final RaftServer.Division leader = RaftTestUtil.waitForLeader(cluster);
+    final RaftServer leaderProxy = leader.getRaftServer();
+    for (RaftServer.Division follower : cluster.getFollowers()) {
       // block followers to trigger ResourceUnavailableException
       ((SimpleStateMachine4Testing) follower.getStateMachine()).blockWriteStateMachineData();
     }
@@ -68,13 +67,13 @@ public class TestRetryCacheWithGrpc
       CompletableFuture<RaftClientReply> f = leaderProxy.submitClientRequestAsync(r);
       f.exceptionally(e -> {
         if (e.getCause() instanceof ResourceUnavailableException) {
-          RaftServerTestUtil.isRetryCacheEntryFailed(RaftServerTestUtil.getRetryEntry(leader, clientId, cid));
+          RetryCacheTestUtil.isFailed(RetryCacheTestUtil.get(leader, clientId, cid));
           failure.set(true);
         }
         return null;
       });
     }
-    for (RaftServerImpl follower : cluster.getFollowers()) {
+    for (RaftServer.Division follower : cluster.getFollowers()) {
       // unblock followers
       ((SimpleStateMachine4Testing)follower.getStateMachine()).unblockWriteStateMachineData();
     }
@@ -82,9 +81,12 @@ public class TestRetryCacheWithGrpc
     while (failure.get()) {
       try {
         // retry until the request failed with ResourceUnavailableException succeeds.
-        leaderProxy.submitClientRequestAsync(r).get();
+        RaftClientReply reply = leaderProxy.submitClientRequestAsync(r).get();
+        if (reply.isSuccess()) {
+          failure.set(false);
+        }
       } catch (Exception e) {
-        failure.set(false);
+        // Ignore the exception
       }
     }
     cluster.shutdown();

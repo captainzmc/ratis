@@ -21,14 +21,14 @@ import org.apache.ratis.BaseTest;
 import org.apache.ratis.RaftTestUtil.SimpleOperation;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerConstants.StartupOption;
-import org.apache.ratis.server.impl.ServerProtoUtils;
-import org.apache.ratis.server.metrics.RaftLogMetrics;
+import org.apache.ratis.server.impl.RaftServerTestUtil;
+import org.apache.ratis.server.metrics.SegmentedRaftLogMetrics;
 import org.apache.ratis.server.protocol.TermIndex;
+import org.apache.ratis.server.raftlog.LogProtoUtils;
 import org.apache.ratis.server.storage.RaftStorage;
-import org.apache.ratis.server.storage.RaftStorageDirectory;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
 import org.apache.ratis.proto.RaftProtos.StateMachineLogEntryProto;
+import org.apache.ratis.server.storage.RaftStorageTestUtils;
 import org.apache.ratis.thirdparty.com.google.protobuf.CodedOutputStream;
 import org.apache.ratis.util.FileUtils;
 import org.apache.ratis.util.Preconditions;
@@ -88,17 +88,15 @@ public class TestLogSegment extends BaseTest {
     if (!isOpen) {
       Preconditions.assertTrue(!isLastEntryPartiallyWritten, "For closed log, the last entry cannot be partially written.");
     }
-    RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    final File file = isOpen ?
-        storage.getStorageDir().getOpenLogFile(startIndex) :
-        storage.getStorageDir().getClosedLogFile(startIndex, startIndex + numEntries - 1);
+    RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final File file = LogSegmentStartEnd.valueOf(startIndex, startIndex + numEntries - 1, isOpen).getFile(storage);
 
     final LogEntryProto[] entries = new LogEntryProto[numEntries];
     try (SegmentedRaftLogOutputStream out = new SegmentedRaftLogOutputStream(file, false,
         segmentMaxSize, preallocatedSize, ByteBuffer.allocateDirect(bufferSize))) {
       for (int i = 0; i < entries.length; i++) {
         SimpleOperation op = new SimpleOperation("m" + i);
-        entries[i] = ServerProtoUtils.toLogEntryProto(op.getLogEntryContent(), term, i + startIndex);
+        entries[i] = LogProtoUtils.toLogEntryProto(op.getLogEntryContent(), term, i + startIndex);
         out.write(entries[i]);
       }
     }
@@ -128,7 +126,7 @@ public class TestLogSegment extends BaseTest {
     Assert.assertEquals(start, segment.getStartIndex());
     Assert.assertEquals(end, segment.getEndIndex());
     Assert.assertEquals(isOpen, segment.isOpen());
-    Assert.assertEquals(totalSize, segment.getTotalSize());
+    Assert.assertEquals(totalSize, segment.getTotalFileSize());
 
     long offset = SegmentedRaftLogFormat.getHeaderLength();
     for (long i = start; i <= end; i++) {
@@ -142,7 +140,7 @@ public class TestLogSegment extends BaseTest {
       if (entry == null) {
         entry = segment.loadCache(record);
       }
-      offset += getEntrySize(entry);
+      offset += getEntrySize(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
     }
   }
 
@@ -169,9 +167,9 @@ public class TestLogSegment extends BaseTest {
   private void testLoadSegment(boolean loadInitial, boolean isLastEntryPartiallyWritten) throws Exception {
     // load an open segment
     final File openSegmentFile = prepareLog(true, 0, 100, 0, isLastEntryPartiallyWritten);
-    RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    LogSegment openSegment = LogSegment.loadSegment(storage, openSegmentFile, 0,
-        INVALID_LOG_INDEX, true, loadInitial, null, null);
+    RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final LogSegment openSegment = LogSegment.loadSegment(storage, openSegmentFile,
+        LogSegmentStartEnd.valueOf(0), loadInitial, null, null);
     final int delta = isLastEntryPartiallyWritten? 1: 0;
     checkLogSegment(openSegment, 0, 99 - delta, true, openSegmentFile.length(), 0);
     storage.close();
@@ -181,9 +179,9 @@ public class TestLogSegment extends BaseTest {
     // load a closed segment (1000-1099)
     final File closedSegmentFile = prepareLog(false, 1000, 100, 1, false);
     LogSegment closedSegment = LogSegment.loadSegment(storage, closedSegmentFile,
-        1000, 1099, false, loadInitial, null, null);
+        LogSegmentStartEnd.valueOf(1000, 1099L), loadInitial, null, null);
     checkLogSegment(closedSegment, 1000, 1099, false,
-        closedSegment.getTotalSize(), 1);
+        closedSegment.getTotalFileSize(), 1);
     Assert.assertEquals(loadInitial ? 0 : 1, closedSegment.getLoadingTimes());
   }
 
@@ -200,23 +198,23 @@ public class TestLogSegment extends BaseTest {
     int i = 0;
     while (size < max) {
       SimpleOperation op = new SimpleOperation("m" + i);
-      LogEntryProto entry = ServerProtoUtils.toLogEntryProto(op.getLogEntryContent(), term, i++ + start);
-      size += getEntrySize(entry);
-      segment.appendToOpenSegment(entry);
+      LogEntryProto entry = LogProtoUtils.toLogEntryProto(op.getLogEntryContent(), term, i++ + start);
+      size += getEntrySize(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
+      segment.appendToOpenSegment(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
     }
 
-    Assert.assertTrue(segment.getTotalSize() >= max);
+    Assert.assertTrue(segment.getTotalFileSize() >= max);
     checkLogSegment(segment, start, i - 1 + start, true, size, term);
   }
 
   @Test
   public void testAppendEntryMetric() throws Exception {
-    RaftLogMetrics raftLogMetrics = new RaftLogMetrics("test");
+    final SegmentedRaftLogMetrics raftLogMetrics = new SegmentedRaftLogMetrics(RaftServerTestUtil.TEST_MEMBER_ID);
 
     final File openSegmentFile = prepareLog(true, 0, 100, 0, true);
-    RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    LogSegment openSegment = LogSegment.loadSegment(storage, openSegmentFile, 0,
-        INVALID_LOG_INDEX, true, true, null, raftLogMetrics);
+    RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final LogSegment openSegment = LogSegment.loadSegment(storage, openSegmentFile,
+        LogSegmentStartEnd.valueOf(0), true, null, raftLogMetrics);
     checkLogSegment(openSegment, 0, 98, true, openSegmentFile.length(), 0);
     storage.close();
 
@@ -233,19 +231,19 @@ public class TestLogSegment extends BaseTest {
     SimpleOperation op = new SimpleOperation("m");
     final StateMachineLogEntryProto m = op.getLogEntryContent();
     try {
-      LogEntryProto entry = ServerProtoUtils.toLogEntryProto(m, 0, 1001);
-      segment.appendToOpenSegment(entry);
+      LogEntryProto entry = LogProtoUtils.toLogEntryProto(m, 0, 1001);
+      segment.appendToOpenSegment(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
       Assert.fail("should fail since the entry's index needs to be 1000");
     } catch (IllegalStateException e) {
       // the exception is expected.
     }
 
-    LogEntryProto entry = ServerProtoUtils.toLogEntryProto(m, 0, 1000);
-    segment.appendToOpenSegment(entry);
+    LogEntryProto entry = LogProtoUtils.toLogEntryProto(m, 0, 1000);
+    segment.appendToOpenSegment(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
 
     try {
-      entry = ServerProtoUtils.toLogEntryProto(m, 0, 1002);
-      segment.appendToOpenSegment(entry);
+      entry = LogProtoUtils.toLogEntryProto(m, 0, 1002);
+      segment.appendToOpenSegment(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
       Assert.fail("should fail since the entry's index needs to be 1001");
     } catch (IllegalStateException e) {
       // the exception is expected.
@@ -258,9 +256,9 @@ public class TestLogSegment extends BaseTest {
     final long start = 1000;
     LogSegment segment = LogSegment.newOpenSegment(null, start, null);
     for (int i = 0; i < 100; i++) {
-      LogEntryProto entry = ServerProtoUtils.toLogEntryProto(
+      LogEntryProto entry = LogProtoUtils.toLogEntryProto(
           new SimpleOperation("m" + i).getLogEntryContent(), term, i + start);
-      segment.appendToOpenSegment(entry);
+      segment.appendToOpenSegment(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
     }
 
     // truncate an open segment (remove 1080~1099)
@@ -284,8 +282,8 @@ public class TestLogSegment extends BaseTest {
 
   @Test
   public void testPreallocateSegment() throws Exception {
-    RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    final File file = storage.getStorageDir().getOpenLogFile(0);
+    RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final File file = LogSegmentStartEnd.valueOf(0).getFile(storage);
     final int[] maxSizes = new int[]{1024, 1025, 1024 * 1024 - 1, 1024 * 1024,
         1024 * 1024 + 1, 2 * 1024 * 1024 - 1, 2 * 1024 * 1024,
         2 * 1024 * 1024 + 1, 8 * 1024 * 1024};
@@ -312,8 +310,8 @@ public class TestLogSegment extends BaseTest {
     try (SegmentedRaftLogOutputStream out = new SegmentedRaftLogOutputStream(file, false,
         1024, 1024, ByteBuffer.allocateDirect(bufferSize))) {
       SimpleOperation op = new SimpleOperation(new String(content));
-      LogEntryProto entry = ServerProtoUtils.toLogEntryProto(op.getLogEntryContent(), 0, 0);
-      size = LogSegment.getEntrySize(entry);
+      LogEntryProto entry = LogProtoUtils.toLogEntryProto(op.getLogEntryContent(), 0, 0);
+      size = LogSegment.getEntrySize(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
       out.write(entry);
     }
     Assert.assertEquals(file.length(),
@@ -333,14 +331,14 @@ public class TestLogSegment extends BaseTest {
   @Test
   public void testPreallocationAndAppend() throws Exception {
     final SizeInBytes max = SizeInBytes.valueOf(2, TraditionalBinaryPrefix.MEGA);
-    RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    final File file = storage.getStorageDir().getOpenLogFile(0);
+    RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final File file = LogSegmentStartEnd.valueOf(0).getFile(storage);
 
     final byte[] content = new byte[1024];
     Arrays.fill(content, (byte) 1);
     SimpleOperation op = new SimpleOperation(new String(content));
-    LogEntryProto entry = ServerProtoUtils.toLogEntryProto(op.getLogEntryContent(), 0, 0);
-    final long entrySize = LogSegment.getEntrySize(entry);
+    LogEntryProto entry = LogProtoUtils.toLogEntryProto(op.getLogEntryContent(), 0, 0);
+    final long entrySize = LogSegment.getEntrySize(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
 
     long totalSize = SegmentedRaftLogFormat.getHeaderLength();
     long preallocated = 16 * 1024;
@@ -363,8 +361,8 @@ public class TestLogSegment extends BaseTest {
 
   @Test
   public void testZeroSizeInProgressFile() throws Exception {
-    final RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    final File file = storage.getStorageDir().getOpenLogFile(0);
+    final RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final File file = LogSegmentStartEnd.valueOf(0).getFile(storage);
     storage.close();
 
     // create zero size in-progress file
@@ -374,8 +372,8 @@ public class TestLogSegment extends BaseTest {
     Assert.assertTrue(Files.exists(path));
     Assert.assertEquals(0, Files.size(path));
 
-    // getLogSegmentFiles should remove it.
-    final List<RaftStorageDirectory.LogPathAndIndex> logs = storage.getStorageDir().getLogSegmentFiles();
+    // getLogSegmentPaths should remove it.
+    final List<LogSegmentPath> logs = LogSegmentPath.getLogSegmentPaths(storage);
     Assert.assertEquals(0, logs.size());
     Assert.assertFalse(Files.exists(path));
   }

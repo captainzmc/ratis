@@ -19,24 +19,27 @@ package org.apache.ratis.server.raftlog.memory;
 
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.protocol.RaftGroupMemberId;
-import org.apache.ratis.protocol.RaftPeerId;
-import org.apache.ratis.server.impl.ServerProtoUtils;
+import org.apache.ratis.server.metrics.RaftLogMetricsBase;
 import org.apache.ratis.server.protocol.TermIndex;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
-import org.apache.ratis.server.raftlog.RaftLog;
+import org.apache.ratis.server.raftlog.RaftLogBase;
+import org.apache.ratis.server.raftlog.LogEntryHeader;
+import org.apache.ratis.server.storage.RaftStorageMetadata;
 import org.apache.ratis.util.AutoCloseableLock;
 import org.apache.ratis.util.Preconditions;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
 
 /**
  * A simple RaftLog implementation in memory. Used only for testing.
  */
-public class MemoryRaftLog extends RaftLog {
+public class MemoryRaftLog extends RaftLogBase {
   static class EntryList {
     private final List<LogEntryProto> entries = new ArrayList<>();
 
@@ -45,7 +48,11 @@ public class MemoryRaftLog extends RaftLog {
     }
 
     TermIndex getTermIndex(int i) {
-      return ServerProtoUtils.toTermIndex(get(i));
+      return TermIndex.valueOf(get(i));
+    }
+
+    private LogEntryHeader getLogEntryHeader(int i) {
+      return LogEntryHeader.valueOf(get(i));
     }
 
     int size() {
@@ -70,10 +77,25 @@ public class MemoryRaftLog extends RaftLog {
   }
 
   private final EntryList entries = new EntryList();
-  private final AtomicReference<Metadata> metadata = new AtomicReference<>(new Metadata(null, 0));
+  private final AtomicReference<RaftStorageMetadata> metadata = new AtomicReference<>(RaftStorageMetadata.getDefault());
+  private final RaftLogMetricsBase metrics;
 
-  public MemoryRaftLog(RaftGroupMemberId memberId, long commitIndex, RaftProperties properties) {
-    super(memberId, commitIndex, properties);
+  public MemoryRaftLog(RaftGroupMemberId memberId,
+                       LongSupplier commitIndexSupplier,
+                       RaftProperties properties) {
+    super(memberId, commitIndexSupplier, properties);
+    this.metrics = new RaftLogMetricsBase(memberId);
+  }
+
+  @Override
+  public void close() throws IOException {
+    super.close();
+    metrics.unregister();
+  }
+
+  @Override
+  public RaftLogMetricsBase getRaftLogMetrics() {
+    return metrics;
   }
 
   @Override
@@ -86,7 +108,7 @@ public class MemoryRaftLog extends RaftLog {
 
   @Override
   public EntryWithData getEntryWithData(long index) {
-    return new EntryWithData(get(index), null);
+    return newEntryWithData(get(index), null);
   }
 
   @Override
@@ -98,7 +120,7 @@ public class MemoryRaftLog extends RaftLog {
   }
 
   @Override
-  public TermIndex[] getEntries(long startIndex, long endIndex) {
+  public LogEntryHeader[] getEntries(long startIndex, long endIndex) {
     checkLogState();
     try(AutoCloseableLock readLock = readLock()) {
       if (startIndex >= entries.size()) {
@@ -106,11 +128,11 @@ public class MemoryRaftLog extends RaftLog {
       }
       final int from = Math.toIntExact(startIndex);
       final int to = Math.toIntExact(Math.min(entries.size(), endIndex));
-      TermIndex[] ti = new TermIndex[to - from];
-      for (int i = 0; i < ti.length; i++) {
-        ti[i] = entries.getTermIndex(i);
+      final LogEntryHeader[] headers = new LogEntryHeader[to - from];
+      for (int i = 0; i < headers.length; i++) {
+        headers[i] = entries.getLogEntryHeader(i);
       }
-      return ti;
+      return headers;
     }
   }
 
@@ -171,7 +193,6 @@ public class MemoryRaftLog extends RaftLog {
       // truncation in the next appendEntries RPC, leader may think entry 7 has
       // been committed but in the system the entry has not been committed to
       // the quorum of peers' disks.
-      // TODO add a unit test for this
       boolean toTruncate = false;
       int truncateIndex = (int) logEntryProtos[0].getIndex();
       int index = 0;
@@ -208,22 +229,18 @@ public class MemoryRaftLog extends RaftLog {
   }
 
   @Override
-  public void writeMetadata(long term, RaftPeerId votedFor) {
-    metadata.set(new Metadata(votedFor, term));
+  public void persistMetadata(RaftStorageMetadata newMetadata) {
+    metadata.set(newMetadata);
   }
 
   @Override
-  public Metadata loadMetadata() {
+  public RaftStorageMetadata loadMetadata() {
     return metadata.get();
   }
 
   @Override
-  public void syncWithSnapshot(long lastSnapshotIndex) {
+  public CompletableFuture<Long> onSnapshotInstalled(long lastSnapshotIndex) {
+    return CompletableFuture.completedFuture(lastSnapshotIndex);
     // do nothing
-  }
-
-  @Override
-  public boolean isConfigEntry(TermIndex ti) {
-    return get(ti.getIndex()).hasConfigurationEntry();
   }
 }

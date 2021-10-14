@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -20,7 +20,9 @@ package org.apache.ratis.examples.common;
 import com.beust.jcommander.Parameter;
 import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
+import org.apache.ratis.protocol.RoutingTable;
 
+import java.util.Collection;
 import java.util.Objects;
 import java.util.stream.Stream;
 
@@ -34,15 +36,30 @@ public abstract class SubCommandBase {
   private String raftGroupId = "demoRaftGroup123";
 
   @Parameter(names = {"--peers", "-r"}, description =
-      "Raft peers (format: name:host:port,"
-          + "name:host:port)", required = true)
+      "Raft peers (format: name:host:port:dataStreamPort:clientPort:adminPort,"
+          + "...)", required = true)
   private String peers;
 
   public static RaftPeer[] parsePeers(String peers) {
     return Stream.of(peers.split(",")).map(address -> {
       String[] addressParts = address.split(":");
-      return new RaftPeer(RaftPeerId.valueOf(addressParts[0]),
-          addressParts[1] + ":" + addressParts[2]);
+      if (addressParts.length < 3) {
+        throw new IllegalArgumentException(
+            "Raft peer " + address + " is not a legitimate format. "
+                + "(format: name:host:port:dataStreamPort:clientPort:adminPort)");
+      }
+      RaftPeer.Builder builder = RaftPeer.newBuilder();
+      builder.setId(addressParts[0]).setAddress(addressParts[1] + ":" + addressParts[2]);
+      if (addressParts.length >= 4) {
+        builder.setDataStreamAddress(addressParts[1] + ":" + addressParts[3]);
+        if (addressParts.length >= 5) {
+          builder.setClientAddress(addressParts[1] + ":" + addressParts[4]);
+          if (addressParts.length >= 6) {
+            builder.setAdminAddress(addressParts[1] + ":" + addressParts[5]);
+          }
+        }
+      }
+      return builder.build();
     }).toArray(RaftPeer[]::new);
   }
 
@@ -50,10 +67,28 @@ public abstract class SubCommandBase {
     return parsePeers(peers);
   }
 
+  public RaftPeer getPrimary() {
+    return parsePeers(peers)[0];
+  }
+
   public abstract void run() throws Exception;
 
   public String getRaftGroupId() {
     return raftGroupId;
+  }
+
+  public RoutingTable getRoutingTable(Collection<RaftPeer> raftPeers, RaftPeer primary) {
+    RoutingTable.Builder builder = RoutingTable.newBuilder();
+    RaftPeer previous = primary;
+    for (RaftPeer peer : raftPeers) {
+      if (peer.equals(primary)) {
+        continue;
+      }
+      builder.addSuccessor(previous.getId(), peer.getId());
+      previous = peer;
+    }
+
+    return builder.build();
   }
 
   /**

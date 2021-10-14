@@ -78,8 +78,12 @@ public class LogReaderImpl implements LogReader {
     try {
       RaftClientReply reply =
           raftClient
-              .sendReadOnly(Message.valueOf(LogServiceProtoUtil
+              .io().sendReadOnly(Message.valueOf(LogServiceProtoUtil
                   .toReadLogRequestProto(parent.getName(), currentRecordId, 1).toByteString()));
+      if (reply.getException() != null) {
+        throw new IOException(reply.getException());
+      }
+
       ReadLogReplyProto proto = ReadLogReplyProto.parseFrom(reply.getMessage().getContent());
       if (proto.hasException()) {
         LogServiceException e = proto.getException();
@@ -89,7 +93,6 @@ public class LogReaderImpl implements LogReader {
       currentRecordId++;
 
       if (proto.getLogRecordCount() > 0) {
-        proto.getLogRecord(0);
         return ByteBuffer.wrap(proto.getLogRecord(0).toByteArray());
       } else {
         return null;
@@ -104,8 +107,12 @@ public class LogReaderImpl implements LogReader {
 
     Preconditions.checkNotNull(buffer, "buffer is NULL" );
     try {
-      RaftClientReply reply = raftClient.sendReadOnly(Message.valueOf(LogServiceProtoUtil
+      RaftClientReply reply = raftClient.io().sendReadOnly(Message.valueOf(LogServiceProtoUtil
           .toReadLogRequestProto(parent.getName(), currentRecordId, 1).toByteString()));
+      if (reply.getException() != null) {
+        throw new IOException(reply.getException());
+      }
+
       ReadLogReplyProto proto = ReadLogReplyProto.parseFrom(reply.getMessage().getContent());
       if (proto.hasException()) {
         LogServiceException e = proto.getException();
@@ -127,8 +134,12 @@ public class LogReaderImpl implements LogReader {
 
     try {
       RaftClientReply reply = raftClient
-          .sendReadOnly(Message.valueOf(LogServiceProtoUtil
+          .io().sendReadOnly(Message.valueOf(LogServiceProtoUtil
               .toReadLogRequestProto(parent.getName(), currentRecordId, numRecords).toByteString()));
+      if (reply.getException() != null) {
+        throw new IOException(reply.getException());
+      }
+
       ReadLogReplyProto proto = ReadLogReplyProto.parseFrom(reply.getMessage().getContent());
       if (proto.hasException()) {
         LogServiceException e = proto.getException();
@@ -154,8 +165,12 @@ public class LogReaderImpl implements LogReader {
     Preconditions.checkArgument(buffers.length > 0, "list of buffers is empty");
 
     try {
-      RaftClientReply reply = raftClient.sendReadOnly(Message.valueOf(LogServiceProtoUtil
+      RaftClientReply reply = raftClient.io().sendReadOnly(Message.valueOf(LogServiceProtoUtil
           .toReadLogRequestProto(parent.getName(), currentRecordId, buffers.length).toByteString()));
+      if (reply.getException() != null) {
+        throw new IOException(reply.getException());
+      }
+
       ReadLogReplyProto proto = ReadLogReplyProto.parseFrom(reply.getMessage().getContent());
       if (proto.hasException()) {
         LogServiceException e = proto.getException();

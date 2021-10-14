@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -26,7 +26,10 @@ import org.apache.ratis.grpc.server.GrpcService;
 import org.apache.ratis.protocol.ClientId;
 import org.apache.ratis.rpc.SupportedRpcType;
 import org.apache.ratis.server.RaftServer;
-import org.apache.ratis.server.impl.*;
+import org.apache.ratis.server.leader.LogAppender;
+import org.apache.ratis.server.ServerFactory;
+import org.apache.ratis.server.leader.FollowerInfo;
+import org.apache.ratis.server.leader.LeaderState;
 import org.apache.ratis.thirdparty.io.netty.buffer.PooledByteBufAllocator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,6 +53,9 @@ public class GrpcFactory implements ServerFactory, ClientFactory {
   }
 
   private final GrpcTlsConfig tlsConfig;
+  private final GrpcTlsConfig adminTlsConfig;
+  private final GrpcTlsConfig clientTlsConfig;
+  private final GrpcTlsConfig serverTlsConfig;
 
   public static Parameters newRaftParameters(GrpcTlsConfig conf) {
     final Parameters p = new Parameters();
@@ -58,15 +64,40 @@ public class GrpcFactory implements ServerFactory, ClientFactory {
   }
 
   public GrpcFactory(Parameters parameters) {
-    this(GrpcConfigKeys.TLS.conf(parameters));
+    this(
+        GrpcConfigKeys.TLS.conf(parameters),
+        GrpcConfigKeys.Admin.tlsConf(parameters),
+        GrpcConfigKeys.Client.tlsConf(parameters),
+        GrpcConfigKeys.Server.tlsConf(parameters)
+    );
   }
 
   public GrpcFactory(GrpcTlsConfig tlsConfig) {
+    this(tlsConfig, null, null, null);
+  }
+
+  private GrpcFactory(GrpcTlsConfig tlsConfig, GrpcTlsConfig adminTlsConfig,
+      GrpcTlsConfig clientTlsConfig, GrpcTlsConfig serverTlsConfig) {
     this.tlsConfig = tlsConfig;
+    this.adminTlsConfig = adminTlsConfig;
+    this.clientTlsConfig = clientTlsConfig;
+    this.serverTlsConfig = serverTlsConfig;
   }
 
   public GrpcTlsConfig getTlsConfig() {
     return tlsConfig;
+  }
+
+  public GrpcTlsConfig getAdminTlsConfig() {
+    return adminTlsConfig != null ? adminTlsConfig : tlsConfig;
+  }
+
+  public GrpcTlsConfig getClientTlsConfig() {
+    return clientTlsConfig != null ? clientTlsConfig : tlsConfig;
+  }
+
+  public GrpcTlsConfig getServerTlsConfig() {
+    return serverTlsConfig != null ? serverTlsConfig : tlsConfig;
   }
 
   @Override
@@ -75,8 +106,7 @@ public class GrpcFactory implements ServerFactory, ClientFactory {
   }
 
   @Override
-  public LogAppender newLogAppender(RaftServerImpl server, LeaderState state,
-                                    FollowerInfo f) {
+  public LogAppender newLogAppender(RaftServer.Division server, LeaderState state, FollowerInfo f) {
     return new GrpcLogAppender(server, state, f);
   }
 
@@ -85,13 +115,16 @@ public class GrpcFactory implements ServerFactory, ClientFactory {
     checkPooledByteBufAllocatorUseCacheForAllThreads(LOG::info);
     return GrpcService.newBuilder()
         .setServer(server)
-        .setTlsConfig(tlsConfig)
+        .setAdminTlsConfig(getAdminTlsConfig())
+        .setServerTlsConfig(getServerTlsConfig())
+        .setClientTlsConfig(getClientTlsConfig())
         .build();
   }
 
   @Override
   public GrpcClientRpc newRaftClientRpc(ClientId clientId, RaftProperties properties) {
     checkPooledByteBufAllocatorUseCacheForAllThreads(LOG::debug);
-    return new GrpcClientRpc(clientId, properties, getTlsConfig());
+    return new GrpcClientRpc(clientId, properties,
+        getAdminTlsConfig(), getClientTlsConfig());
   }
 }

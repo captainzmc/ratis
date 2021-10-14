@@ -20,20 +20,40 @@ package org.apache.ratis.server.impl;
 import org.apache.ratis.BaseTest;
 import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
+import org.apache.ratis.server.RaftConfiguration;
+import org.junit.Assert;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.stream.Collectors;
+
 
 public class TestRaftConfiguration extends BaseTest {
   @Test
-  public void testPeerConfiguration() {
-    final RaftPeer[] peers = {
-        new RaftPeer(RaftPeerId.valueOf("s0")),
-        new RaftPeer(RaftPeerId.valueOf("s1")),
-        new RaftPeer(RaftPeerId.valueOf("s0")),
-    };
-    testFailureCase("Duplicated peers", () -> {
-      new PeerConfiguration(Arrays.asList(peers));
-    }, IllegalArgumentException.class);
+  public void testIsHighestPriority() {
+    Integer node1 = 0;
+    Integer node2 = 1;
+    Integer node3 = 2;
+    PeerConfiguration peerConfig = new PeerConfiguration(raftPeersWithPriority(node1, node2, node3));
+    RaftConfiguration config = RaftConfigurationImpl.newBuilder().setConf(peerConfig).build();
+    RaftPeer[] allRaftPeers = peerConfig.getPeers().toArray(new RaftPeer[peerConfig.getPeers().size()]);
+
+    // First member should not have highest priority
+    Assert.assertFalse(RaftServerTestUtil.isHighestPriority(config,
+        allRaftPeers[0].getId()));
+
+    // Last member should have highest priority
+    Assert.assertTrue(RaftServerTestUtil.isHighestPriority(config,
+        allRaftPeers[allRaftPeers.length - 1].getId()));
+
+    // Should return false for non existent peer id
+    Assert.assertFalse(RaftServerTestUtil.isHighestPriority(config, RaftPeerId.valueOf("123456789")));
+  }
+
+  private Collection<RaftPeer> raftPeersWithPriority(Integer... voters) {
+    return Arrays.stream(voters)
+        .map(id -> RaftPeer.newBuilder().setPriority(id).setId(id.toString()).build())
+        .collect(Collectors.toSet());
   }
 }

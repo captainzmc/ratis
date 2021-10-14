@@ -20,10 +20,12 @@ package org.apache.ratis.grpc.client;
 import org.apache.ratis.client.impl.ClientProtoUtils;
 import org.apache.ratis.grpc.GrpcUtil;
 import org.apache.ratis.protocol.*;
+import org.apache.ratis.protocol.exceptions.AlreadyClosedException;
+import org.apache.ratis.protocol.exceptions.GroupMismatchException;
+import org.apache.ratis.protocol.exceptions.RaftException;
 import org.apache.ratis.thirdparty.io.grpc.stub.StreamObserver;
 import org.apache.ratis.proto.RaftProtos.RaftClientReplyProto;
 import org.apache.ratis.proto.RaftProtos.RaftClientRequestProto;
-import org.apache.ratis.proto.RaftProtos.SetConfigurationRequestProto;
 import org.apache.ratis.proto.grpc.RaftClientProtocolServiceGrpc.RaftClientProtocolServiceImplBase;
 import org.apache.ratis.util.CollectionUtils;
 import org.apache.ratis.util.JavaUtils;
@@ -58,8 +60,11 @@ public class GrpcClientProtocolService extends RaftClientProtocolServiceImplBase
 
     @Override
     public void fail(Throwable t) {
-      Preconditions.assertTrue(t instanceof RaftException, () -> "Requires RaftException but " + t);
-      setReply(new RaftClientReply(request, (RaftException) t, null));
+      final RaftException e = Preconditions.assertInstanceOf(t, RaftException.class);
+      setReply(RaftClientReply.newBuilder()
+          .setRequest(request)
+          .setException(e)
+          .build());
     }
 
     @Override
@@ -102,11 +107,11 @@ public class GrpcClientProtocolService extends RaftClientProtocolServiceImplBase
     private final Map<Integer, OrderedRequestStreamObserver> map = new ConcurrentHashMap<>();
 
     void putNew(OrderedRequestStreamObserver so) {
-      CollectionUtils.putNew(so.getId(), so, map, () -> getClass().getSimpleName());
+      CollectionUtils.putNew(so.getId(), so, map, () -> JavaUtils.getClassSimpleName(getClass()));
     }
 
     void removeExisting(OrderedRequestStreamObserver so) {
-      CollectionUtils.removeExisting(so.getId(), so, map, () -> getClass().getSimpleName());
+      CollectionUtils.removeExisting(so.getId(), so, map, () -> JavaUtils.getClassSimpleName(getClass()));
     }
 
     void closeAllExisting(RaftGroupId groupId) {
@@ -139,14 +144,6 @@ public class GrpcClientProtocolService extends RaftClientProtocolServiceImplBase
   }
 
   @Override
-  public void setConfiguration(SetConfigurationRequestProto proto,
-      StreamObserver<RaftClientReplyProto> responseObserver) {
-    final SetConfigurationRequest request = ClientProtoUtils.toSetConfigurationRequest(proto);
-    GrpcUtil.asyncCall(responseObserver, () -> protocol.setConfigurationAsync(request),
-        ClientProtoUtils::toRaftClientReplyProto);
-  }
-
-  @Override
   public StreamObserver<RaftClientRequestProto> ordered(StreamObserver<RaftClientReplyProto> responseObserver) {
     final OrderedRequestStreamObserver so = new OrderedRequestStreamObserver(responseObserver);
     orderedStreamObservers.putNew(so);
@@ -167,7 +164,7 @@ public class GrpcClientProtocolService extends RaftClientProtocolServiceImplBase
 
   private abstract class RequestStreamObserver implements StreamObserver<RaftClientRequestProto> {
     private final int id = streamCount.getAndIncrement();
-    private final String name = getId() + "-" + getClass().getSimpleName() + id;
+    private final String name = getId() + "-" + JavaUtils.getClassSimpleName(getClass()) + id;
     private final StreamObserver<RaftClientReplyProto> responseObserver;
     private final AtomicBoolean isClosed = new AtomicBoolean();
 
@@ -243,7 +240,7 @@ public class GrpcClientProtocolService extends RaftClientProtocolServiceImplBase
       try {
         final RaftClientRequest r = ClientProtoUtils.toRaftClientRequest(request);
         processClientRequest(r);
-      } catch (Throwable e) {
+      } catch (Exception e) {
         responseError(e, () -> "onNext for " + ClientProtoUtils.toString(request) + " in " + name);
       }
     }
@@ -347,7 +344,7 @@ public class GrpcClientProtocolService extends RaftClientProtocolServiceImplBase
       if (!requestGroupId.equals(updated)) {
         final GroupMismatchException exception = new GroupMismatchException(getId()
             + ": The group (" + requestGroupId + ") of " + r.getClientId()
-            + " does not match the group (" + updated + ") of the " + getClass().getSimpleName());
+            + " does not match the group (" + updated + ") of the " + JavaUtils.getClassSimpleName(getClass()));
         responseError(exception, () -> "processClientRequest (Group mismatched) for " + r);
         return;
       }

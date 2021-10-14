@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -17,10 +17,11 @@
  */
 package org.apache.ratis.statemachine;
 
+import java.util.ArrayList;
 import java.util.concurrent.TimeUnit;
 import org.apache.log4j.Level;
 import org.apache.ratis.BaseTest;
-import org.apache.ratis.MiniRaftCluster;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.RaftTestUtil;
 import org.apache.ratis.client.RaftClient;
 import org.apache.ratis.conf.RaftProperties;
@@ -30,10 +31,8 @@ import org.apache.ratis.protocol.RaftGroup;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerImpl;
-import org.apache.ratis.server.impl.RaftServerProxy;
-import org.apache.ratis.server.impl.RaftServerTestUtil;
 import org.apache.ratis.server.simulation.MiniRaftClusterWithSimulatedRpc;
 import org.apache.ratis.util.Log4jUtils;
 import org.junit.*;
@@ -47,7 +46,6 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 import static org.junit.Assert.*;
 
@@ -56,14 +54,14 @@ import static org.junit.Assert.*;
  */
 public class TestStateMachine extends BaseTest implements MiniRaftClusterWithSimulatedRpc.FactoryGet {
   static {
-    Log4jUtils.setLogLevel(RaftServerImpl.LOG, Level.DEBUG);
+    Log4jUtils.setLogLevel(RaftServer.Division.LOG, Level.DEBUG);
     Log4jUtils.setLogLevel(RaftClient.LOG, Level.DEBUG);
   }
 
   public static final int NUM_SERVERS = 3;
 
   static class SMTransactionContext extends SimpleStateMachine4Testing {
-    public static SMTransactionContext get(RaftServerImpl s) {
+    public static SMTransactionContext get(RaftServer.Division s) {
       return (SMTransactionContext)s.getStateMachine();
     }
 
@@ -103,8 +101,8 @@ public class TestStateMachine extends BaseTest implements MiniRaftClusterWithSim
           assertNull(context);
         }
         numApplied.incrementAndGet();
-      } catch (Throwable t) {
-        throwable.set(t);
+      } catch (Exception e) {
+        throwable.set(e);
       }
       return CompletableFuture.completedFuture(null);
     }
@@ -144,24 +142,24 @@ public class TestStateMachine extends BaseTest implements MiniRaftClusterWithSim
     final RaftTestUtil.SimpleMessage[] messages = RaftTestUtil.SimpleMessage.create(numTrx);
     try(final RaftClient client = cluster.createClient()) {
       for (RaftTestUtil.SimpleMessage message : messages) {
-        client.send(message);
+        client.io().send(message);
       }
     }
 
     // TODO: there eshould be a better way to ensure all data is replicated and applied
     Thread.sleep(cluster.getTimeoutMax().toLong(TimeUnit.MILLISECONDS) + 100);
 
-    for (RaftServerImpl raftServer : cluster.iterateServerImpls()) {
+    for (RaftServer.Division raftServer : cluster.iterateDivisions()) {
       final SMTransactionContext sm = SMTransactionContext.get(raftServer);
       sm.rethrowIfException();
       assertEquals(numTrx, sm.numApplied.get());
     }
 
     // check leader
-    RaftServerImpl raftServer = cluster.getLeader();
+    RaftServer.Division raftServer = cluster.getLeader();
     // assert every transaction has obtained context in leader
     final SMTransactionContext sm = SMTransactionContext.get(raftServer);
-    List<Long> ll = sm.applied.stream().collect(Collectors.toList());
+    final List<Long> ll = new ArrayList<>(sm.applied);
     Collections.sort(ll);
     assertEquals(ll.toString(), ll.size(), numTrx);
     for (int i=0; i < numTrx; i++) {
@@ -185,16 +183,16 @@ public class TestStateMachine extends BaseTest implements MiniRaftClusterWithSim
       for(RaftGroupId gid : registry.keySet()) {
         final RaftGroup newGroup = RaftGroup.valueOf(gid, cluster.getPeers());
         LOG.info("add new group: " + newGroup);
-        final RaftClient client = cluster.createClient(newGroup);
-        for(RaftPeer p : newGroup.getPeers()) {
-          client.groupAdd(newGroup, p.getId());
+        try (final RaftClient client = cluster.createClient(newGroup)) {
+          for (RaftPeer p : newGroup.getPeers()) {
+            client.getGroupManagementApi(p.getId()).add(newGroup);
+          }
         }
       }
 
-      final RaftServerProxy proxy = cluster.getServer(id);
+      final RaftServer server = cluster.getServer(id);
       for(Map.Entry<RaftGroupId, StateMachine> e: registry.entrySet()) {
-        final RaftServerImpl impl = RaftServerTestUtil.getRaftServerImpl(proxy, e.getKey());
-        Assert.assertSame(e.getValue(), impl.getStateMachine());
+        Assert.assertSame(e.getValue(), server.getDivision(e.getKey()).getStateMachine());
       }
     }
   }

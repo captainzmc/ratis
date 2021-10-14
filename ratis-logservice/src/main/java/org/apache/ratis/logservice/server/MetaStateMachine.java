@@ -29,6 +29,7 @@ import java.util.stream.IntStream;
 import java.util.stream.StreamSupport;
 
 import com.codahale.metrics.Timer;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.ratis.client.RaftClient;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.logservice.api.LogInfo;
@@ -38,7 +39,7 @@ import org.apache.ratis.logservice.common.Constants;
 import org.apache.ratis.logservice.common.LogAlreadyExistException;
 import org.apache.ratis.logservice.common.LogNotFoundException;
 import org.apache.ratis.logservice.common.NoEnoughWorkersException;
-import org.apache.ratis.logservice.metrics.LogServiceMetricsRegistry;
+import org.apache.ratis.logservice.metrics.LogServiceMetaDataMetrics;
 import org.apache.ratis.logservice.proto.LogServiceProtos;
 import org.apache.ratis.logservice.proto.MetaServiceProtos;
 import org.apache.ratis.logservice.proto.MetaServiceProtos.CreateLogRequestProto;
@@ -49,7 +50,6 @@ import org.apache.ratis.logservice.proto.MetaServiceProtos.LogServiceUnregisterL
 import org.apache.ratis.logservice.proto.MetaServiceProtos.MetaSMRequestProto;
 import org.apache.ratis.logservice.util.LogServiceProtoUtil;
 import org.apache.ratis.logservice.util.MetaServiceProtoUtil;
-import org.apache.ratis.metrics.RatisMetricRegistry;
 import org.apache.ratis.proto.RaftProtos;
 import org.apache.ratis.protocol.*;
 
@@ -58,6 +58,7 @@ import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.storage.RaftStorage;
 import org.apache.ratis.statemachine.TransactionContext;
 import org.apache.ratis.statemachine.impl.BaseStateMachine;
+import org.apache.ratis.thirdparty.com.google.common.annotations.VisibleForTesting;
 import org.apache.ratis.thirdparty.com.google.protobuf.InvalidProtocolBufferException;
 import org.apache.ratis.util.AutoCloseableLock;
 import org.apache.ratis.util.Daemon;
@@ -103,7 +104,7 @@ public class MetaStateMachine extends BaseStateMachine {
 
     private RaftGroupId metadataGroupId;
     private RaftGroupId logServerGroupId;
-    private RatisMetricRegistry metricRegistry;
+    private LogServiceMetaDataMetrics logServiceMetaDataMetrics;
 
     public MetaStateMachine(RaftGroupId metadataGroupId, RaftGroupId logServerGroupId,
                             long failureDetectionPeriod) {
@@ -115,21 +116,26 @@ public class MetaStateMachine extends BaseStateMachine {
     @Override
     public void initialize(RaftServer server, RaftGroupId groupId, RaftStorage storage) throws IOException {
         this.raftServer = server;
-        this.metricRegistry = LogServiceMetricsRegistry
-            .createMetricRegistryForLogServiceMetaData(server.getId().toString());
+        this.logServiceMetaDataMetrics = new LogServiceMetaDataMetrics(server.getId().toString());
         super.initialize(server, groupId, storage);
         peerHealthChecker = new Daemon(new PeerHealthChecker(),"peer-Health-Checker");
         peerHealthChecker.start();
     }
 
+    @VisibleForTesting
+    public void setProperties(RaftProperties properties) {
+      this.properties = properties;
+    }
+
     @Override
-    public TransactionContext applyTransactionSerial(TransactionContext trx) {
+    public TransactionContext applyTransactionSerial(TransactionContext trx) throws InvalidProtocolBufferException {
         RaftProtos.LogEntryProto x = trx.getLogEntry();
         MetaSMRequestProto req = null;
         try {
             req = MetaSMRequestProto.parseFrom(x.getStateMachineLogEntry().getLogData());
         } catch (InvalidProtocolBufferException e) {
             e.printStackTrace();
+            throw e;
         }
         switch (req.getTypeCase()) {
             case REGISTERREQUEST:
@@ -196,47 +202,54 @@ public class MetaStateMachine extends BaseStateMachine {
         return super.applyTransaction(trx);
     }
 
+
     @Override
     public CompletableFuture<Message> query(Message request) {
         Timer.Context timerContext = null;
         MetaServiceProtos.MetaServiceRequestProto.TypeCase type = null;
-        try {
-            if (currentGroup == null) {
-                try {
-                    List<RaftGroup> x =
-                        StreamSupport.stream(raftServer.getGroups().spliterator(), false)
-                            .filter(group -> group.getGroupId().equals(metadataGroupId)).collect(Collectors.toList());
-                    if (x.size() == 1) {
-                        currentGroup = x.get(0);
-                    }
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-
-            MetaServiceProtos.MetaServiceRequestProto req = null;
+        if (currentGroup == null) {
             try {
-                req = MetaServiceProtos.MetaServiceRequestProto.parseFrom(request.getContent());
-            } catch (InvalidProtocolBufferException e) {
+                List<RaftGroup> x =
+                        StreamSupport.stream(raftServer.getGroups().spliterator(), false)
+                          .filter(group -> group.getGroupId().equals(metadataGroupId)).collect(Collectors.toList());
+                if (x.size() == 1) {
+                    currentGroup = x.get(0);
+                }
+            } catch (IOException e) {
                 e.printStackTrace();
             }
-            type = req.getTypeCase();
-            timerContext = metricRegistry.timer(type.name()).time();
+        }
+
+        MetaServiceProtos.MetaServiceRequestProto req;
+        try {
+            req = MetaServiceProtos.MetaServiceRequestProto.parseFrom(request.getContent());
+        } catch (InvalidProtocolBufferException e) {
+            e.printStackTrace();
+            return null;
+        }
+        type = req.getTypeCase();
+        // Main purpose of this try catch block is to make sure that
+        // timerContext.stop() is run after return.
+        try {
+            timerContext = logServiceMetaDataMetrics.getTimer(type.name()).time();
             switch (type) {
 
-            case CREATELOG:
-                return processCreateLogRequest(req);
-            case LISTLOGS:
-                return processListLogsRequest();
-            case GETLOG:
-                return processGetLogRequest(req);
-            case DELETELOG:
-                return processDeleteLog(req);
-            default:
+                case CREATELOG:
+                    return processCreateLogRequest(req);
+                case LISTLOGS:
+                    return processListLogsRequest();
+                case GETLOG:
+                    return processGetLogRequest(req);
+                case DELETELOG:
+                    return processDeleteLog(req);
+                default:
+                    CompletableFuture<Message> reply = super.query(request);
+                    return reply;
             }
-            CompletableFuture<Message> reply = super.query(request);
-            return reply;
-        }finally{
+        } catch (Exception e) {
+            LOG.error("Exception during Meta State Machine query");
+            throw e;
+        } finally {
             if (timerContext != null) {
                 timerContext.stop();
             }
@@ -257,22 +270,16 @@ public class MetaStateMachine extends BaseStateMachine {
         } else {
             Collection<RaftPeer> raftPeers = raftGroup.getPeers();
             raftPeers.stream().forEach(peer -> {
-                RaftClient client = RaftClient.newBuilder().setProperties(properties)
-                    .setClientId(ClientId.randomId())
-                    .setRaftGroup(RaftGroup.valueOf(logServerGroupId, peer)).build();
-                try {
-                    client.groupRemove(raftGroup.getGroupId(), true, peer.getId());
+                try (RaftClient client = RaftClient.newBuilder().setProperties(properties)
+                    .setClientId(ClientId.randomId()).setRaftGroup(RaftGroup.valueOf(logServerGroupId, peer)).build()){
+                    client.getGroupManagementApi(peer.getId()).remove(raftGroup.getGroupId(), true, false);
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
             });
-            RaftClient client = RaftClient.newBuilder()
-                    .setRaftGroup(currentGroup)
-                    .setClientId(ClientId.randomId())
-                    .setProperties(properties)
-                    .build();
-            try {
-                client.send(() -> MetaServiceProtos.MetaSMRequestProto.newBuilder()
+            try (RaftClient client = RaftClient.newBuilder().setRaftGroup(currentGroup)
+                .setClientId(ClientId.randomId()).setProperties(properties).build()){
+                client.io().send(() -> MetaServiceProtos.MetaSMRequestProto.newBuilder()
                         .setUnregisterRequest(
                                 LogServiceUnregisterLogRequestProto.newBuilder()
                                         .setLogname(LogServiceProtoUtil.toLogNameProto(logName)))
@@ -319,10 +326,9 @@ public class MetaStateMachine extends BaseStateMachine {
                 int provisionedPeers = 0;
                 Exception originalException = null;
                 for (RaftPeer peer : peers) {
-                    RaftClient client = RaftClient.newBuilder().setProperties(properties)
-                        .setRaftGroup(RaftGroup.valueOf(logServerGroupId, peer)).build();
-                    try {
-                        client.groupAdd(raftGroup, peer.getId());
+                    try (RaftClient client = RaftClient.newBuilder().setProperties(properties)
+                        .setRaftGroup(RaftGroup.valueOf(logServerGroupId, peer)).build()) {
+                        client.getGroupManagementApi(peer.getId()).add(raftGroup);
                     } catch (IOException e) {
                         LOG.error("Failed to add Raft group ({}) for new Log({})",
                             raftGroup.getGroupId(), name, e);
@@ -339,10 +345,9 @@ public class MetaStateMachine extends BaseStateMachine {
                         if (tornDownPeers >= provisionedPeers) {
                             break;
                         }
-                        RaftClient client = RaftClient.newBuilder().setProperties(properties)
-                            .setRaftGroup(RaftGroup.valueOf(logServerGroupId, peer)).build();
-                        try {
-                            client.groupRemove(raftGroup.getGroupId(), true, peer.getId());
+                        try (RaftClient client = RaftClient.newBuilder().setProperties(properties)
+                            .setRaftGroup(RaftGroup.valueOf(logServerGroupId, peer)).build()) {
+                            client.getGroupManagementApi(peer.getId()).remove(raftGroup.getGroupId(), true, false);
                         } catch (IOException e) {
                             LOG.error("Failed to clean up Raft group ({}) for peer ({}), "
                                 + "ignoring exception", raftGroup.getGroupId(), peer, e);
@@ -354,13 +359,9 @@ public class MetaStateMachine extends BaseStateMachine {
                         MetaServiceProtoUtil.toCreateLogExceptionReplyProto(originalException)
                             .build().toByteString()));
                 }
-                RaftClient client = RaftClient.newBuilder()
-                        .setRaftGroup(currentGroup)
-                        .setClientId(ClientId.randomId())
-                        .setProperties(properties)
-                        .build();
-                try {
-                    client.send(() -> MetaServiceProtos.MetaSMRequestProto.newBuilder()
+                try (RaftClient client = RaftClient.newBuilder().setRaftGroup(currentGroup)
+                    .setClientId(ClientId.randomId()).setProperties(properties).build()){
+                    client.io().send(() -> MetaServiceProtos.MetaSMRequestProto.newBuilder()
                             .setRegisterRequest(LogServiceRegisterLogRequestProto.newBuilder()
                                     .setLogname(LogServiceProtoUtil.toLogNameProto(name))
                                     .setRaftGroup(MetaServiceProtoUtil
@@ -411,7 +412,7 @@ public class MetaStateMachine extends BaseStateMachine {
     }
 
 
-    class PeerGroups implements Comparable{
+    static class PeerGroups implements Comparable{
         private RaftPeer peer;
         private Set<RaftGroup> groups = new HashSet<>();
 
@@ -428,6 +429,7 @@ public class MetaStateMachine extends BaseStateMachine {
         }
 
         @Override
+        @SuppressFBWarnings("EQ_COMPARETO_USE_OBJECT_EQUALS")
         public int compareTo(Object o) {
             return groups.size() - ((PeerGroups) o).groups.size();
         }
@@ -454,13 +456,12 @@ public class MetaStateMachine extends BaseStateMachine {
                                 while(itr.hasNext()) {
                                     LogName logName = itr.next();
                                     RaftGroup group = map.get(logName);
-                                    RaftClient client = RaftClient.newBuilder().
-                                            setRaftGroup(group).setProperties(properties).build();
-                                    try {
+                                    try (RaftClient client = RaftClient.newBuilder()
+                                        .setRaftGroup(group).setProperties(properties).build()) {
                                         LOG.warn(String.format("Peer %s in the group %s went down." +
                                                         " Hence closing the log %s serve by the group.",
                                                 raftPeer.toString(), group.toString(), logName.toString()));
-                                        RaftClientReply reply = client.send(
+                                        RaftClientReply reply = client.io().send(
                                                 () -> LogServiceProtoUtil.
                                                         toChangeStateRequestProto(logName, LogStream.State.CLOSED, true)
                                                         .toByteString());
@@ -471,7 +472,6 @@ public class MetaStateMachine extends BaseStateMachine {
                                             throw new IOException(message.getException().getErrorMsg());
                                         }
                                         itr.remove();
-                                        client.close();
                                     } catch (IOException e) {
                                         LOG.warn(String.format("Failed to close log %s on peer %s failure.",
                                                 logName, raftPeer.toString()), e);
@@ -517,5 +517,10 @@ public class MetaStateMachine extends BaseStateMachine {
             return false;
         }
         return true;
+    }
+
+    @Override
+    public void close() {
+      logServiceMetaDataMetrics.unregister();
     }
 }

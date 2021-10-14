@@ -17,31 +17,35 @@
  */
 package org.apache.ratis.server.storage;
 
-import static org.apache.ratis.server.metrics.RaftLogMetrics.RAFT_LOG_FLUSH_TIME;
-import static org.apache.ratis.server.metrics.RaftLogMetrics.RATIS_LOG_WORKER_METRICS;
+import static org.apache.ratis.server.metrics.SegmentedRaftLogMetrics.RAFT_LOG_FLUSH_TIME;
+import static org.apache.ratis.server.metrics.SegmentedRaftLogMetrics.RATIS_LOG_WORKER_METRICS;
 
-import org.apache.ratis.protocol.RaftPeerId;
-import org.apache.ratis.server.impl.ServerProtoUtils;
-import org.apache.ratis.server.metrics.RatisMetrics;
+import org.apache.ratis.metrics.RatisMetrics;
 import org.apache.ratis.server.protocol.TermIndex;
-import org.apache.ratis.server.raftlog.RaftLog;
+import org.apache.ratis.server.raftlog.LogProtoUtils;
+import org.apache.ratis.server.raftlog.RaftLogBase;
 import org.apache.ratis.server.raftlog.RaftLogIOException;
 import org.apache.ratis.util.AutoCloseableLock;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.function.Consumer;
 
 public interface RaftStorageTestUtils {
-
-  static String getLogFlushTimeMetric(RaftPeerId serverId) {
-    return getRaftLogFullMetric(serverId, RAFT_LOG_FLUSH_TIME);
+  static RaftStorage newRaftStorage(File dir) throws IOException {
+    return new RaftStorageImpl(dir, null, 0L);
   }
 
-  static String getRaftLogFullMetric(RaftPeerId serverId, String metricName) {
+  static String getLogFlushTimeMetric(String memberId) {
+    return getRaftLogFullMetric(memberId, RAFT_LOG_FLUSH_TIME);
+  }
+
+  static String getRaftLogFullMetric(String memberId, String metricName) {
     return RatisMetrics.RATIS_APPLICATION_NAME_METRICS + "." + RATIS_LOG_WORKER_METRICS
-        + "." + serverId + "." + metricName;
+        + "." + memberId + "." + metricName;
   }
 
-  static void printLog(RaftLog log, Consumer<String> println) {
+  static void printLog(RaftLogBase log, Consumer<String> println) {
     if (log == null) {
       println.accept("log == null");
       return;
@@ -61,7 +65,7 @@ public interface RaftStorageTestUtils {
       b.append(i == committed? 'c': ' ');
       b.append(String.format("%3d: ", i));
       try {
-        b.append(ServerProtoUtils.toLogEntryString(log.get(i)));
+        b.append(LogProtoUtils.toLogEntryString(log.get(i)));
       } catch (RaftLogIOException e) {
         b.append(e);
       }

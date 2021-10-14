@@ -50,7 +50,7 @@ public final class MetaServiceProtoUtil {
     }
 
     public static RaftPeer toRaftPeer(RaftPeerProto p) {
-        return new RaftPeer(RaftPeerId.valueOf(p.getId()), p.getAddress());
+        return RaftPeer.newBuilder().setId(p.getId()).setAddress(p.getAddress()).build();
     }
 
     public static RaftGroup toRaftGroup(RaftGroupProto proto) {
@@ -159,10 +159,10 @@ public final class MetaServiceProtoUtil {
 
     public static IOException toMetaServiceException(MetaServiceExceptionProto exceptionProto) {
         try {
-            IOException result = null;
+            final IOException result;
             Class<?> clazz = Class.forName(exceptionProto.getExceptionClassName());
             Exception e = ReflectionUtils.instantiateException(
-                    clazz.asSubclass(Exception.class), exceptionProto.getErrorMsg(), null);
+                    clazz.asSubclass(Exception.class), exceptionProto.getErrorMsg());
             if(e instanceof IOException) {
                 result = (IOException)e;
             } else {

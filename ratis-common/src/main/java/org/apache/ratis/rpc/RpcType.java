@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,6 +18,7 @@
 package org.apache.ratis.rpc;
 
 import org.apache.ratis.conf.Parameters;
+import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.ReflectionUtils;
 
 /** The type of RPC implementations. */
@@ -33,20 +34,21 @@ public interface RpcType {
     final Throwable fromSupportedRpcType;
     try { // Try parsing it as a SupportedRpcType
       return SupportedRpcType.valueOfIgnoreCase(rpcType);
-    } catch (Throwable t) {
-      fromSupportedRpcType = t;
+    } catch (Exception e) {
+      fromSupportedRpcType = e;
     }
 
     try {
       // Try using it as a class name
       return ReflectionUtils.newInstance(
           ReflectionUtils.getClass(rpcType, RpcType.class));
-    } catch(Throwable t) {
+    } catch(Exception e) {
+      final String classname = JavaUtils.getClassSimpleName(RpcType.class);
       final IllegalArgumentException iae = new IllegalArgumentException(
-          "Invalid " + RpcType.class.getSimpleName() + ": \"" + rpcType + "\" "
-              + " cannot be used as a user-defined " + RpcType.class.getSimpleName()
-              + " and it is not a " + SupportedRpcType.class.getSimpleName() + ".");
-      iae.addSuppressed(t);
+          "Invalid " + classname + ": \"" + rpcType + "\" "
+              + " cannot be used as a user-defined " + classname
+              + " and it is not a " + JavaUtils.getClassSimpleName(SupportedRpcType.class) + ".");
+      iae.addSuppressed(e);
       iae.addSuppressed(fromSupportedRpcType);
       throw iae;
     }
@@ -55,7 +57,7 @@ public interface RpcType {
   /** @return the name of the rpc type. */
   String name();
 
-  /** @return a new factory created using the given properties and parameters. */
+  /** @return a new factory created using the given parameters. */
   RpcFactory newFactory(Parameters parameters);
 
   /** An interface to get {@link RpcType}. */

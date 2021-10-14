@@ -25,15 +25,12 @@ import org.apache.ratis.grpc.client.GrpcOutputStream;
 import org.apache.ratis.protocol.ClientId;
 import org.apache.ratis.util.Log4jUtils;
 import org.apache.ratis.util.SizeInBytes;
-import org.junit.Ignore;
 
 import java.io.OutputStream;
 
 /**
  * Test {@link GrpcOutputStream}
- * TODO: {@link GrpcOutputStream} current has some bugs.
  */
-@Ignore
 public class TestGrpcOutputStream
     extends OutputStreamBaseTest<MiniRaftClusterWithGrpc>
     implements MiniRaftClusterWithGrpc.FactoryGet {

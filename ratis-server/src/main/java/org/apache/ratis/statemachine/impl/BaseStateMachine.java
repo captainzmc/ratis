@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,24 +19,27 @@
 package org.apache.ratis.statemachine.impl;
 
 import com.codahale.metrics.Timer;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.ratis.proto.RaftProtos;
 import org.apache.ratis.protocol.Message;
 import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.apache.ratis.server.RaftServer;
-import org.apache.ratis.server.impl.RaftServerConstants;
 import org.apache.ratis.server.protocol.TermIndex;
+import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.server.storage.RaftStorage;
 import org.apache.ratis.statemachine.SnapshotInfo;
+import org.apache.ratis.statemachine.SnapshotRetentionPolicy;
 import org.apache.ratis.statemachine.StateMachine;
 import org.apache.ratis.statemachine.StateMachineStorage;
 import org.apache.ratis.statemachine.TransactionContext;
+import org.apache.ratis.thirdparty.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.LifeCycle;
 import org.apache.ratis.util.Preconditions;
 
 import java.io.IOException;
-import java.util.Collection;
 import java.util.Objects;
 import java.util.SortedMap;
 import java.util.TreeMap;
@@ -46,17 +49,18 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Base implementation for StateMachines.
  */
-public class BaseStateMachine implements StateMachine {
+public class BaseStateMachine implements StateMachine, StateMachine.DataApi,
+    StateMachine.EventApi, StateMachine.LeaderEventApi, StateMachine.FollowerEventApi {
   private final CompletableFuture<RaftServer> server = new CompletableFuture<>();
   private volatile RaftGroupId groupId;
-  private final LifeCycle lifeCycle = new LifeCycle(getClass().getSimpleName());
+  private final LifeCycle lifeCycle = new LifeCycle(JavaUtils.getClassSimpleName(getClass()));
 
   private final AtomicReference<TermIndex> lastAppliedTermIndex = new AtomicReference<>();
 
   private final SortedMap<Long, CompletableFuture<Void>> transactionFutures = new TreeMap<>();
 
   public BaseStateMachine() {
-    setLastAppliedTermIndex(TermIndex.newTermIndex(0, -1));
+    setLastAppliedTermIndex(TermIndex.valueOf(0, -1));
   }
 
   public RaftPeerId getId() {
@@ -93,11 +97,6 @@ public class BaseStateMachine implements StateMachine {
   }
 
   @Override
-  public void notifyNotLeader(Collection<TransactionContext> pendingEntries) throws IOException {
-    // do nothing
-  }
-
-  @Override
   public void pause() {
   }
 
@@ -106,7 +105,7 @@ public class BaseStateMachine implements StateMachine {
   }
 
   @Override
-  public TransactionContext applyTransactionSerial(TransactionContext trx) {
+  public TransactionContext applyTransactionSerial(TransactionContext trx) throws InvalidProtocolBufferException {
     return trx;
   }
 
@@ -129,12 +128,13 @@ public class BaseStateMachine implements StateMachine {
   }
 
   @Override
-  public void notifyIndexUpdate(long term, long index) {
+  public void notifyTermIndexUpdated(long term, long index) {
     updateLastAppliedTermIndex(term, index);
   }
 
+  @SuppressFBWarnings("NP_NULL_PARAM_DEREF")
   protected boolean updateLastAppliedTermIndex(long term, long index) {
-    final TermIndex newTI = TermIndex.newTermIndex(term, index);
+    final TermIndex newTI = TermIndex.valueOf(term, index);
     final TermIndex oldTI = lastAppliedTermIndex.getAndSet(newTI);
     if (!newTI.equals(oldTI)) {
       LOG.trace("{}: update lastAppliedTermIndex from {} to {}", getId(), oldTI, newTI);
@@ -156,7 +156,7 @@ public class BaseStateMachine implements StateMachine {
 
   @Override
   public long takeSnapshot() throws IOException {
-    return RaftServerConstants.INVALID_LOG_INDEX;
+    return RaftLog.INVALID_LOG_INDEX;
   }
 
   @Override
@@ -195,6 +195,7 @@ public class BaseStateMachine implements StateMachine {
   }
 
   @Override
+  @SuppressFBWarnings("NP_NULL_PARAM_DEREF")
   public CompletableFuture<Message> query(Message request) {
     return CompletableFuture.completedFuture(null);
   }
@@ -224,7 +225,7 @@ public class BaseStateMachine implements StateMachine {
 
   @Override
   public String toString() {
-    return getClass().getSimpleName() + ":"
+    return JavaUtils.getClassSimpleName(getClass()) + ":"
         + (!server.isDone()? "uninitialized": getId() + ":" + groupId);
   }
 

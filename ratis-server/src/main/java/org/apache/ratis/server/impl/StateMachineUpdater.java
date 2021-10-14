@@ -17,18 +17,20 @@
  */
 package org.apache.ratis.server.impl;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.RaftProtos.CommitInfoProto;
 import org.apache.ratis.protocol.Message;
-import org.apache.ratis.protocol.StateMachineException;
+import org.apache.ratis.protocol.exceptions.StateMachineException;
 import org.apache.ratis.server.RaftServerConfigKeys;
+import org.apache.ratis.server.raftlog.LogProtoUtils;
 import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
 import org.apache.ratis.server.raftlog.RaftLogIOException;
 import org.apache.ratis.server.raftlog.RaftLogIndex;
 import org.apache.ratis.statemachine.SnapshotInfo;
 import org.apache.ratis.statemachine.StateMachine;
-import org.apache.ratis.statemachine.impl.SnapshotRetentionPolicy;
+import org.apache.ratis.statemachine.SnapshotRetentionPolicy;
 import org.apache.ratis.util.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -59,7 +61,7 @@ class StateMachineUpdater implements Runnable {
   static final Logger LOG = LoggerFactory.getLogger(StateMachineUpdater.class);
 
   enum State {
-    RUNNING, STOP, RELOAD
+    RUNNING, STOP, RELOAD, EXCEPTION
   }
 
   private final Consumer<Object> infoIndexChange;
@@ -83,7 +85,7 @@ class StateMachineUpdater implements Runnable {
 
   StateMachineUpdater(StateMachine stateMachine, RaftServerImpl server,
       ServerState serverState, long lastAppliedIndex, RaftProperties properties) {
-    this.name = serverState.getMemberId() + "-" + getClass().getSimpleName();
+    this.name = serverState.getMemberId() + "-" + JavaUtils.getClassSimpleName(getClass());
     this.infoIndexChange = s -> LOG.info("{}: {}", name, s);
     this.debugIndexChange = s -> LOG.debug("{}: {}", name, s);
 
@@ -128,7 +130,8 @@ class StateMachineUpdater implements Runnable {
       stateMachine.close();
       stateMachineMetrics.unregister();
     } catch(Throwable t) {
-      LOG.warn(name + ": Failed to close " + stateMachine.getClass().getSimpleName() + " " + stateMachine, t);
+      LOG.warn(name + ": Failed to close " + JavaUtils.getClassSimpleName(stateMachine.getClass())
+          + " " + stateMachine, t);
     }
   }
 
@@ -137,6 +140,10 @@ class StateMachineUpdater implements Runnable {
    * have been applied to the state machine.
    */
   void stopAndJoin() throws InterruptedException {
+    if (state == State.EXCEPTION) {
+      stop();
+      return;
+    }
     if (stopIndex.compareAndSet(null, raftLog.getLastCommittedIndex())) {
       notifyUpdater();
       LOG.info("{}: set stopIndex = {}", this, stopIndex);
@@ -149,6 +156,7 @@ class StateMachineUpdater implements Runnable {
     notifyUpdater();
   }
 
+  @SuppressFBWarnings("NN_NAKED_NOTIFY")
   synchronized void notifyUpdater() {
     notifyAll();
   }
@@ -175,18 +183,14 @@ class StateMachineUpdater implements Runnable {
           checkAndTakeSnapshot(futures);
           stop();
         }
-      } catch (InterruptedException e) {
-        if (state == State.STOP) {
-          LOG.info("{}: the StateMachineUpdater is interrupted and will exit.", this);
-        } else {
-          final String s = this + ": the StateMachineUpdater is wrongly interrupted";
-          LOG.error(s, e);
-          server.shutdown(false);
-        }
       } catch (Throwable t) {
-        final String s = this + ": the StateMachineUpdater hits Throwable";
-        LOG.error(s, t);
-        server.shutdown(false);
+        if (t instanceof InterruptedException && state == State.STOP) {
+          LOG.info("{} was interrupted.  Exiting ...", this);
+        } else {
+          state = State.EXCEPTION;
+          LOG.error(this + " caught a Throwable.", t);
+          server.close();
+        }
       }
     }
   }
@@ -222,7 +226,7 @@ class StateMachineUpdater implements Runnable {
       final LogEntryProto next = raftLog.get(nextIndex);
       if (next != null) {
         if (LOG.isTraceEnabled()) {
-          LOG.trace("{}: applying nextIndex={}, nextLog={}", this, nextIndex, ServerProtoUtils.toString(next));
+          LOG.trace("{}: applying nextIndex={}, nextLog={}", this, nextIndex, LogProtoUtils.toLogEntryString(next));
         } else {
           LOG.debug("{}: applying nextIndex={}", this, nextIndex);
         }

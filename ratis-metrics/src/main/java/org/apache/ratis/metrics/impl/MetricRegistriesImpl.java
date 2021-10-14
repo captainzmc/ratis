@@ -28,7 +28,9 @@ import java.util.function.Consumer;
 import org.apache.ratis.metrics.MetricRegistries;
 import org.apache.ratis.metrics.MetricRegistryFactory;
 import org.apache.ratis.metrics.MetricRegistryInfo;
+import org.apache.ratis.metrics.MetricsReporting;
 import org.apache.ratis.metrics.RatisMetricRegistry;
+import org.apache.ratis.util.TimeDuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,6 +42,8 @@ public class MetricRegistriesImpl extends MetricRegistries {
   private static final Logger LOG = LoggerFactory.getLogger(MetricRegistriesImpl.class);
 
   private final List<Consumer<RatisMetricRegistry>> reporterRegistrations = new CopyOnWriteArrayList<>();
+
+  private final List<Consumer<RatisMetricRegistry>> stopReporters = new CopyOnWriteArrayList<>();
 
   private final MetricRegistryFactory factory;
 
@@ -58,9 +62,11 @@ public class MetricRegistriesImpl extends MetricRegistries {
   public RatisMetricRegistry create(MetricRegistryInfo info) {
     return registries.put(info, () -> {
       if (reporterRegistrations.isEmpty()) {
-        LOG.warn(
-            "First MetricRegistry has been created without registering reporters. You may need to call" +
-                " MetricRegistries.global().addReportRegistration(...) before.");
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("First MetricRegistry has been created without registering reporters. " +
+              "Hence registering JMX reporter by default.");
+        }
+        enableJmxReporter();
       }
       RatisMetricRegistry registry = factory.create(info);
       reporterRegistrations.forEach(reg -> reg.accept(registry));
@@ -70,6 +76,11 @@ public class MetricRegistriesImpl extends MetricRegistries {
 
   @Override
   public boolean remove(MetricRegistryInfo key) {
+    RatisMetricRegistry registry = registries.get(key);
+    if (registry != null) {
+      stopReporters.forEach(reg -> reg.accept(registry));
+    }
+
     return registries.remove(key) == null;
   }
 
@@ -94,7 +105,27 @@ public class MetricRegistriesImpl extends MetricRegistries {
   }
 
   @Override
-  public void addReporterRegistration(Consumer<RatisMetricRegistry> reporterRegistration) {
+  public void addReporterRegistration(Consumer<RatisMetricRegistry> reporterRegistration,
+      Consumer<RatisMetricRegistry> stopReporter) {
+    if (registries.size() > 0) {
+      LOG.warn("New reporters are added after registries were created. Some metrics will be missing from the reporter. "
+          + "Please add reporter before adding any new registry.");
+    }
     this.reporterRegistrations.add(reporterRegistration);
+    this.stopReporters.add(stopReporter);
+  }
+
+  @Override
+  public void enableJmxReporter() {
+    addReporterRegistration(
+        MetricsReporting.jmxReporter(),
+        MetricsReporting.stopJmxReporter());
+  }
+
+  @Override
+  public void enableConsoleReporter(TimeDuration consoleReportRate) {
+    addReporterRegistration(
+        MetricsReporting.consoleReporter(consoleReportRate),
+        MetricsReporting.stopConsoleReporter());
   }
 }

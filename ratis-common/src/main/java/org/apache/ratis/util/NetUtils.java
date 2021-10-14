@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -20,8 +20,12 @@ package org.apache.ratis.util;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.*;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -112,10 +116,41 @@ public interface NetUtils {
     return addr;
   }
 
+  /**
+   * Creates {@code count} unique local addresses.  They may conflict with
+   * addresses created later, but not with one another.  Addresses are
+   * guaranteed to be bound to the loopback interface.
+   * @param count number of unique local addresses to create
+   * @return {@code count} number of unique local addresses
+   */
+  static List<InetSocketAddress> createLocalServerAddress(int count) {
+    List<InetSocketAddress> list = new ArrayList<>(count);
+    List<ServerSocket> sockets = new ArrayList<>(count);
+    try {
+      for (int i = 0; i < count; i++) {
+        ServerSocket s = new ServerSocket();
+        sockets.add(s);
+        s.setReuseAddress(true);
+        s.bind(new InetSocketAddress(InetAddress.getByName(null), 0), 1);
+        list.add((InetSocketAddress) s.getLocalSocketAddress());
+      }
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    } finally {
+      IOUtils.cleanup(null, sockets.toArray(new Closeable[0]));
+    }
+    return list;
+  }
+
+  /**
+   * Creates a unique local address.  Addresses are guaranteed to be bound to
+   * the loopback interface.
+   * @return unique local address
+   */
   static InetSocketAddress createLocalServerAddress() {
     try(ServerSocket s = new ServerSocket()) {
       s.setReuseAddress(true);
-      s.bind(null);
+      s.bind(new InetSocketAddress(InetAddress.getByName(null), 0), 1);
       return (InetSocketAddress) s.getLocalSocketAddress();
     } catch (IOException e) {
       throw new RuntimeException(e);
@@ -123,6 +158,9 @@ public interface NetUtils {
   }
 
   static String address2String(InetSocketAddress address) {
+    if (address == null) {
+      return null;
+    }
     final StringBuilder b = new StringBuilder(address.getHostName());
     if (address.getAddress() instanceof Inet6Address) {
       b.insert(0, '[').append(']');

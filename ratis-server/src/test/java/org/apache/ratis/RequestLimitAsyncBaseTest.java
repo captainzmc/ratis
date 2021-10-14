@@ -26,8 +26,9 @@ import org.apache.ratis.proto.RaftProtos.ReplicationLevel;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.exceptions.ResourceUnavailableException;
 import org.apache.ratis.retry.RetryPolicies;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerImpl;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.server.impl.RaftServerTestUtil;
 import org.apache.ratis.statemachine.SimpleStateMachine4Testing;
 import org.apache.ratis.util.Log4jUtils;
@@ -44,7 +45,7 @@ public abstract class RequestLimitAsyncBaseTest<CLUSTER extends MiniRaftCluster>
     extends BaseTest
     implements MiniRaftCluster.Factory.Get<CLUSTER> {
   static {
-    Log4jUtils.setLogLevel(RaftServerImpl.LOG, Level.DEBUG);
+    Log4jUtils.setLogLevel(RaftServer.Division.LOG, Level.DEBUG);
     Log4jUtils.setLogLevel(RaftClient.LOG, Level.DEBUG);
     RaftServerTestUtil.setPendingRequestsLogLevel(Level.DEBUG);
   }
@@ -66,12 +67,12 @@ public abstract class RequestLimitAsyncBaseTest<CLUSTER extends MiniRaftCluster>
   }
 
   void runTestWriteElementLimit(CLUSTER cluster) throws Exception {
-    final RaftServerImpl leader = RaftTestUtil.waitForLeader(cluster);
+    final RaftServer.Division leader = RaftTestUtil.waitForLeader(cluster);
 
     try (RaftClient c1 = cluster.createClient(leader.getId())) {
       { // send first message to make sure the cluster is working
         final SimpleMessage message = new SimpleMessage("first");
-        final CompletableFuture<RaftClientReply> future = c1.sendAsync(message);
+        final CompletableFuture<RaftClientReply> future = c1.async().send(message);
         final RaftClientReply reply = getWithDefaultTimeout(future);
         Assert.assertTrue(reply.isSuccess());
       }
@@ -84,13 +85,13 @@ public abstract class RequestLimitAsyncBaseTest<CLUSTER extends MiniRaftCluster>
       final List<CompletableFuture<RaftClientReply>> writeFutures = new ArrayList<>();
       for (int i = 0; i < writeElementLimit; i++) {
         final SimpleMessage message = new SimpleMessage("m" + i);
-        writeFutures.add(c1.sendAsync(message));
+        writeFutures.add(c1.async().send(message));
       }
 
       // send watch requests up to the limit
       final long watchBase = 1000; //watch a large index so that it won't complete
       for (int i = 0; i < watchElementLimit; i++) {
-        c1.sendWatchAsync(watchBase + i, ReplicationLevel.ALL);
+        c1.async().watch(watchBase + i, ReplicationLevel.ALL);
       }
 
       // sleep to make sure that all the request were sent
@@ -99,16 +100,16 @@ public abstract class RequestLimitAsyncBaseTest<CLUSTER extends MiniRaftCluster>
       try(RaftClient c2 = cluster.createClient(leader.getId(), RetryPolicies.noRetry())) {
         // more write requests should get ResourceUnavailableException
         final SimpleMessage message = new SimpleMessage("err");
-        testFailureCase("send should fail", () -> c2.send(message),
+        testFailureCase("send should fail", () -> c2.io().send(message),
             ResourceUnavailableException.class);
-        testFailureCase("sendAsync should fail", () -> c2.sendAsync(message).get(),
+        testFailureCase("sendAsync should fail", () -> c2.async().send(message).get(),
             ExecutionException.class, ResourceUnavailableException.class);
 
         // more watch requests should get ResourceUnavailableException
         final long watchIndex = watchBase + watchElementLimit;
-        testFailureCase("sendWatch should fail", () -> c2.sendWatch(watchIndex, ReplicationLevel.ALL),
+        testFailureCase("sendWatch should fail", () -> c2.io().watch(watchIndex, ReplicationLevel.ALL),
             ResourceUnavailableException.class);
-        testFailureCase("sendWatchAsync should fail", () -> c2.sendWatchAsync(watchIndex, ReplicationLevel.ALL).get(),
+        testFailureCase("sendWatchAsync should fail", () -> c2.async().watch(watchIndex, ReplicationLevel.ALL).get(),
             ExecutionException.class, ResourceUnavailableException.class);
       }
 

@@ -17,24 +17,28 @@
  */
 package org.apache.ratis.client.api;
 
+import org.apache.ratis.io.CloseAsync;
 import org.apache.ratis.protocol.Message;
 import org.apache.ratis.protocol.RaftClientReply;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 
 /** Stream {@link Message}(s) asynchronously. */
-public interface MessageOutputStream extends AutoCloseable {
-  CompletableFuture<RaftClientReply> sendAsync(Message message);
+public interface MessageOutputStream extends CloseAsync<RaftClientReply> {
+  /**
+   * Send asynchronously the given message to this stream.
+   *
+   * If end-of-request is true, this message is the last message of the request.
+   * All the messages accumulated are considered as a single request.
+   *
+   * @param message the message to be sent.
+   * @param endOfRequest Is this an end-of-request?
+   * @return a future of the reply.
+   */
+  CompletableFuture<RaftClientReply> sendAsync(Message message, boolean endOfRequest);
 
-  CompletableFuture<RaftClientReply> closeAsync();
-
-  default void close() throws Exception {
-    try {
-      closeAsync().get();
-    } catch (ExecutionException e) {
-      final Throwable cause = e.getCause();
-      throw cause instanceof Exception? (Exception)cause: e;
-    }
+  /** The same as sendAsync(message, false). */
+  default CompletableFuture<RaftClientReply> sendAsync(Message message) {
+    return sendAsync(message, false);
   }
 }

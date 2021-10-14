@@ -18,6 +18,7 @@
 package org.apache.ratis.client;
 
 import org.apache.ratis.conf.RaftProperties;
+import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.SizeInBytes;
 import org.apache.ratis.util.TimeDuration;
 import org.slf4j.Logger;
@@ -77,7 +78,7 @@ public interface RaftClientConfigKeys {
     }
 
     interface Experimental {
-      String PREFIX = Async.PREFIX + "." + Experimental.class.getSimpleName().toLowerCase();
+      String PREFIX = Async.PREFIX + "." + JavaUtils.getClassSimpleName(Experimental.class).toLowerCase();
 
       String SEND_DUMMY_REQUEST_KEY = PREFIX + ".send-dummy-request";
       boolean SEND_DUMMY_REQUEST_DEFAULT = true;
@@ -90,8 +91,22 @@ public interface RaftClientConfigKeys {
     }
   }
 
-  interface Stream {
-    String PREFIX = RaftClientConfigKeys.PREFIX + ".stream";
+  interface DataStream {
+    String PREFIX = RaftClientConfigKeys.PREFIX + ".data-stream";
+
+    String OUTSTANDING_REQUESTS_MAX_KEY = PREFIX + ".outstanding-requests.max";
+    int OUTSTANDING_REQUESTS_MAX_DEFAULT = 10;
+    static int outstandingRequestsMax(RaftProperties properties) {
+      return getInt(properties::getInt, OUTSTANDING_REQUESTS_MAX_KEY,
+          OUTSTANDING_REQUESTS_MAX_DEFAULT, getDefaultLog(), requireMin(2));
+    }
+    static void setOutstandingRequestsMax(RaftProperties properties, int outstandingRequests) {
+      setInt(properties::setInt, OUTSTANDING_REQUESTS_MAX_KEY, outstandingRequests);
+    }
+  }
+
+  interface MessageStream {
+    String PREFIX = RaftClientConfigKeys.PREFIX + ".message-stream";
 
     String SUBMESSAGE_SIZE_KEY = PREFIX + ".submessage-size";
     SizeInBytes SUBMESSAGE_SIZE_DEFAULT = SizeInBytes.valueOf("1MB");

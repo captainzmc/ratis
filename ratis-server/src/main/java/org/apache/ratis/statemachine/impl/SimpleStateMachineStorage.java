@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -17,10 +17,12 @@
  */
 package org.apache.ratis.statemachine.impl;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.ratis.io.MD5Hash;
 import org.apache.ratis.server.protocol.TermIndex;
 import org.apache.ratis.server.storage.FileInfo;
 import org.apache.ratis.server.storage.RaftStorage;
+import org.apache.ratis.statemachine.SnapshotRetentionPolicy;
 import org.apache.ratis.statemachine.StateMachineStorage;
 import org.apache.ratis.thirdparty.com.google.common.annotations.VisibleForTesting;
 import org.apache.ratis.util.AtomicFileOutputStream;
@@ -72,6 +74,7 @@ public class SimpleStateMachineStorage implements StateMachineStorage {
   }
 
   @Override
+  @SuppressFBWarnings("NP_NULL_ON_SOME_PATH")
   public void cleanupOldSnapshots(SnapshotRetentionPolicy snapshotRetentionPolicy) throws IOException {
     if (snapshotRetentionPolicy != null && snapshotRetentionPolicy.getNumSnapshotsRetained() > 0) {
 
@@ -113,7 +116,7 @@ public class SimpleStateMachineStorage implements StateMachineStorage {
     }
     final long term = Long.parseLong(m.group(1));
     final long index = Long.parseLong(m.group(2));
-    return TermIndex.newTermIndex(term, index);
+    return TermIndex.valueOf(term, index);
   }
 
   protected static String getTmpSnapshotFileName(long term, long endIndex) {
@@ -136,6 +139,7 @@ public class SimpleStateMachineStorage implements StateMachineStorage {
     return new File(smDir, getCorruptSnapshotFileName(term, endIndex));
   }
 
+  @SuppressFBWarnings("NP_NULL_ON_SOME_PATH")
   public SingleFileSnapshotInfo findLatestSnapshot() throws IOException {
     SingleFileSnapshotInfo latest = null;
     try (DirectoryStream<Path> stream =
@@ -178,6 +182,7 @@ public class SimpleStateMachineStorage implements StateMachineStorage {
 /**
  * Compare snapshot files based on transaction indexes.
  */
+@SuppressFBWarnings("SE_COMPARATOR_SHOULD_BE_SERIALIZABLE")
 class SnapshotFileComparator implements Comparator<SingleFileSnapshotInfo> {
   @Override
   public int compare(SingleFileSnapshotInfo file1, SingleFileSnapshotInfo file2) {

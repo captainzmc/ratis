@@ -22,8 +22,13 @@ import org.apache.ratis.RaftTestUtil.SimpleMessage;
 import org.apache.ratis.client.RaftClient;
 import org.apache.ratis.client.RaftClientRpc;
 import org.apache.ratis.protocol.*;
+import org.apache.ratis.protocol.exceptions.GroupMismatchException;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
+import org.apache.ratis.protocol.exceptions.StaleReadException;
+import org.apache.ratis.protocol.exceptions.StateMachineException;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerImpl;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.server.raftlog.RaftLogIOException;
 import org.apache.ratis.util.JavaUtils;
@@ -42,7 +47,7 @@ public abstract class RaftExceptionBaseTest<CLUSTER extends MiniRaftCluster>
     extends BaseTest
     implements MiniRaftCluster.Factory.Get<CLUSTER> {
   static {
-    Log4jUtils.setLogLevel(RaftServerImpl.LOG, Level.DEBUG);
+    Log4jUtils.setLogLevel(RaftServer.Division.LOG, Level.DEBUG);
     Log4jUtils.setLogLevel(RaftLog.LOG, Level.DEBUG);
     Log4jUtils.setLogLevel(RaftClient.LOG, Level.DEBUG);
   }
@@ -55,29 +60,16 @@ public abstract class RaftExceptionBaseTest<CLUSTER extends MiniRaftCluster>
 
   @Test
   public void testHandleNotLeaderException() throws Exception {
-    runWithNewCluster(NUM_PEERS, cluster -> runTestHandleNotLeaderException(false, cluster));
+    runWithNewCluster(NUM_PEERS, cluster -> runTestHandleNotLeaderException(cluster));
   }
 
-  /**
-   * Test handle both IOException and NotLeaderException
-   */
-  @Test
-  public void testHandleNotLeaderAndIOException() throws Exception {
-    runWithNewCluster(NUM_PEERS, cluster -> runTestHandleNotLeaderException(true, cluster));
-  }
-
-  void runTestHandleNotLeaderException(boolean killNewLeader, CLUSTER cluster) throws Exception {
+  void runTestHandleNotLeaderException(CLUSTER cluster) throws Exception {
     final RaftPeerId oldLeader = RaftTestUtil.waitForLeader(cluster).getId();
     try(final RaftClient client = cluster.createClient(oldLeader)) {
       sendMessage("m1", client);
 
       // enforce leader change
       final RaftPeerId newLeader = RaftTestUtil.changeLeader(cluster, oldLeader);
-
-      if (killNewLeader) {
-        // kill the new leader
-        cluster.killServer(newLeader);
-      }
 
       final RaftClientRpc rpc = client.getClientRpc();
       JavaUtils.attemptRepeatedly(() -> assertNotLeaderException(newLeader, "m2", oldLeader, rpc, cluster),
@@ -100,7 +92,7 @@ public abstract class RaftExceptionBaseTest<CLUSTER extends MiniRaftCluster>
   }
 
   static void sendMessage(String message, RaftClient client) throws IOException {
-    final RaftClientReply reply = client.send(new SimpleMessage(message));
+    final RaftClientReply reply = client.io().send(new SimpleMessage(message));
     Assert.assertTrue(reply.isSuccess());
   }
 
@@ -117,11 +109,12 @@ public abstract class RaftExceptionBaseTest<CLUSTER extends MiniRaftCluster>
       final RaftPeerId newLeader = RaftTestUtil.changeLeader(cluster, oldLeader);
 
       // add two more peers
-      MiniRaftCluster.PeerChanges change = cluster.addNewPeers(new String[]{"ss1", "ss2"}, true);
+      MiniRaftCluster.PeerChanges change = cluster.addNewPeers(new String[]{
+          "ss1", "ss2"}, true, false);
       // trigger setConfiguration
       LOG.info("Start changing the configuration: {}", Arrays.asList(change.allPeersInNewConf));
       try (final RaftClient c2 = cluster.createClient(newLeader)) {
-        RaftClientReply reply = c2.setConfiguration(change.allPeersInNewConf);
+        RaftClientReply reply = c2.admin().setConfiguration(change.allPeersInNewConf);
         Assert.assertTrue(reply.isSuccess());
       }
       LOG.info(cluster.printServers());
@@ -158,19 +151,20 @@ public abstract class RaftExceptionBaseTest<CLUSTER extends MiniRaftCluster>
     // Create client using another group
     try(RaftClient client = cluster.createClient(anotherGroup)) {
       testFailureCase("send(..) with client group being different from the server group",
-          () -> client.send(Message.EMPTY),
+          () -> client.io().send(Message.EMPTY),
           GroupMismatchException.class);
 
       testFailureCase("sendReadOnly(..) with client group being different from the server group",
-          () -> client.sendReadOnly(Message.EMPTY),
+          () -> client.io().sendReadOnly(Message.EMPTY),
           GroupMismatchException.class);
 
       testFailureCase("setConfiguration(..) with client group being different from the server group",
-          () -> client.setConfiguration(RaftPeer.emptyArray()),
+          () -> client.admin().setConfiguration(RaftPeer.emptyArray()),
           GroupMismatchException.class);
 
       testFailureCase("groupRemove(..) with another group id",
-          () -> client.groupRemove(anotherGroup.getGroupId(), false, clusterGroup.getPeers().iterator().next().getId()),
+          () -> client.getGroupManagementApi(clusterGroup.getPeers().iterator().next().getId())
+              .remove(anotherGroup.getGroupId(), false, false),
           GroupMismatchException.class);
     }
   }
@@ -185,7 +179,7 @@ public abstract class RaftExceptionBaseTest<CLUSTER extends MiniRaftCluster>
     try (RaftClient client = cluster.createClient()) {
       final RaftPeerId follower = cluster.getFollowers().iterator().next().getId();
       testFailureCase("sendStaleRead(..) with a large commit index",
-          () -> client.sendStaleRead(Message.EMPTY, 1_000_000_000L, follower),
+          () -> client.io().sendStaleRead(Message.EMPTY, 1_000_000_000L, follower),
           StateMachineException.class, StaleReadException.class);
     }
   }
@@ -202,7 +196,7 @@ public abstract class RaftExceptionBaseTest<CLUSTER extends MiniRaftCluster>
     SimpleMessage msg = new SimpleMessage(new String(bytes));
     try (RaftClient client = cluster.createClient(leaderId)) {
       testFailureCase("testLogAppenderBufferCapacity",
-          () -> client.send(msg),
+          () -> client.io().send(msg),
           StateMachineException.class, RaftLogIOException.class);
     }
   }

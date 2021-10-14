@@ -20,7 +20,7 @@ package org.apache.ratis.netty;
 import org.apache.ratis.client.RaftClientConfigKeys;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.protocol.RaftPeer;
-import org.apache.ratis.protocol.TimeoutIOException;
+import org.apache.ratis.protocol.exceptions.TimeoutIOException;
 import org.apache.ratis.thirdparty.io.netty.channel.*;
 import org.apache.ratis.thirdparty.io.netty.channel.nio.NioEventLoopGroup;
 import org.apache.ratis.thirdparty.io.netty.channel.socket.SocketChannel;
@@ -42,6 +42,7 @@ import java.util.LinkedList;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import static org.apache.ratis.proto.netty.NettyProtos.RaftNettyServerReplyProto.RaftNettyServerReplyCase.EXCEPTIONREPLY;
@@ -62,6 +63,7 @@ public class NettyRpcProxy implements Closeable {
       try {
         return new NettyRpcProxy(peer, properties, group);
       } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
         throw IOUtils.toInterruptedIOException("Failed connecting to " + peer, e);
       }
     }
@@ -77,6 +79,8 @@ public class NettyRpcProxy implements Closeable {
     switch (proto.getRaftNettyServerReplyCase()) {
       case REQUESTVOTEREPLY:
         return proto.getRequestVoteReply().getServerReply().getCallId();
+      case STARTLEADERELECTIONREPLY:
+        return proto.getStartLeaderElectionReply().getServerReply().getCallId();
       case APPENDENTRIESREPLY:
         return proto.getAppendEntriesReply().getServerReply().getCallId();
       case INSTALLSNAPSHOTREPLY:
@@ -181,8 +185,10 @@ public class NettyRpcProxy implements Closeable {
 
     try {
       channelFuture.sync();
-      return reply.get(requestTimeoutDuration.getDuration(), requestTimeoutDuration.getUnit());
+      TimeDuration newDuration = requestTimeoutDuration.add(request.getTimeoutMs(), TimeUnit.MILLISECONDS);
+      return reply.get(newDuration.getDuration(), newDuration.getUnit());
     } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
       throw IOUtils.toInterruptedIOException(ProtoUtils.toString(request)
           + " sending from " + peer + " is interrupted.", e);
     } catch (ExecutionException e) {

@@ -17,9 +17,14 @@
  */
 package org.apache.ratis.server.impl;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import org.apache.ratis.proto.RaftProtos.RaftClientRequestProto.TypeCase;
 import org.apache.ratis.proto.RaftProtos.CommitInfoProto;
 import org.apache.ratis.protocol.*;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
+import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.statemachine.TransactionContext;
+import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.Preconditions;
 
 import java.util.Collection;
@@ -29,17 +34,33 @@ public class PendingRequest implements Comparable<PendingRequest> {
   private final long index;
   private final RaftClientRequest request;
   private final TransactionContext entry;
-  private final CompletableFuture<RaftClientReply> future;
+  private final CompletableFuture<RaftClientReply> futureToComplete = new CompletableFuture<>();
+  private final CompletableFuture<RaftClientReply> futureToReturn;
 
   PendingRequest(long index, RaftClientRequest request, TransactionContext entry) {
     this.index = index;
     this.request = request;
     this.entry = entry;
-    this.future = new CompletableFuture<>();
+    if (request.is(TypeCase.FORWARD)) {
+      futureToReturn = futureToComplete.thenApply(reply -> convert(request, reply));
+    } else {
+      futureToReturn = futureToComplete;
+    }
   }
 
   PendingRequest(SetConfigurationRequest request) {
-    this(RaftServerConstants.INVALID_LOG_INDEX, request, null);
+    this(RaftLog.INVALID_LOG_INDEX, request, null);
+  }
+
+  RaftClientReply convert(RaftClientRequest q, RaftClientReply p) {
+    return RaftClientReply.newBuilder()
+        .setRequest(q)
+        .setCommitInfos(p.getCommitInfos())
+        .setLogIndex(p.getLogIndex())
+        .setMessage(p.getMessage())
+        .setException(p.getException())
+        .setSuccess(p.isSuccess())
+        .build();
   }
 
   long getIndex() {
@@ -51,7 +72,7 @@ public class PendingRequest implements Comparable<PendingRequest> {
   }
 
   public CompletableFuture<RaftClientReply> getFuture() {
-    return future;
+    return futureToReturn;
   }
 
   TransactionContext getEntry() {
@@ -63,27 +84,31 @@ public class PendingRequest implements Comparable<PendingRequest> {
    */
   synchronized void setException(Throwable e) {
     Preconditions.assertTrue(e != null);
-    future.completeExceptionally(e);
+    futureToComplete.completeExceptionally(e);
   }
 
   synchronized void setReply(RaftClientReply r) {
     Preconditions.assertTrue(r != null);
-    future.complete(r);
+    futureToComplete.complete(r);
   }
 
   TransactionContext setNotLeaderException(NotLeaderException nle, Collection<CommitInfoProto> commitInfos) {
-    setReply(new RaftClientReply(getRequest(), nle, commitInfos));
+    setReply(RaftClientReply.newBuilder()
+        .setRequest(getRequest())
+        .setException(nle)
+        .setCommitInfos(commitInfos)
+        .build());
     return getEntry();
   }
 
   @Override
+  @SuppressFBWarnings("EQ_COMPARETO_USE_OBJECT_EQUALS")
   public int compareTo(PendingRequest that) {
     return Long.compare(this.index, that.index);
   }
 
   @Override
   public String toString() {
-    return getClass().getSimpleName() + "(index=" + index
-        + ", request=" + request;
+    return JavaUtils.getClassSimpleName(getClass()) + ":index=" + index + ", request=" + request;
   }
 }

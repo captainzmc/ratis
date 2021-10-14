@@ -27,13 +27,12 @@ import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.protocol.RaftGroupMemberId;
 import org.apache.ratis.protocol.RaftPeerId;
-import org.apache.ratis.protocol.StateMachineException;
+import org.apache.ratis.protocol.exceptions.StateMachineException;
 import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerConstants;
-import org.apache.ratis.server.impl.RaftServerImpl;
-import org.apache.ratis.server.impl.ServerProtoUtils;
 import org.apache.ratis.server.protocol.TermIndex;
+import org.apache.ratis.server.raftlog.LogProtoUtils;
+import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.server.raftlog.segmented.SegmentedRaftLogInputStream;
 import org.apache.ratis.server.raftlog.segmented.SegmentedRaftLogOutputStream;
 import org.apache.ratis.server.storage.RaftStorage;
@@ -52,7 +51,6 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.Objects;
@@ -71,14 +69,14 @@ import java.util.concurrent.TimeUnit;
  * For snapshot it simply merges all the log segments together.
  */
 public class SimpleStateMachine4Testing extends BaseStateMachine {
-  private static volatile int SNAPSHOT_THRESHOLD = 100;
+  private static final int SNAPSHOT_THRESHOLD = 100;
   private static final Logger LOG = LoggerFactory.getLogger(SimpleStateMachine4Testing.class);
   private static final String RAFT_TEST_SIMPLE_STATE_MACHINE_TAKE_SNAPSHOT_KEY
       = "raft.test.simple.state.machine.take.snapshot";
   private static final boolean RAFT_TEST_SIMPLE_STATE_MACHINE_TAKE_SNAPSHOT_DEFAULT = false;
   private boolean notifiedAsLeader;
 
-  public static SimpleStateMachine4Testing get(RaftServerImpl s) {
+  public static SimpleStateMachine4Testing get(RaftServer.Division s) {
     return (SimpleStateMachine4Testing)s.getStateMachine();
   }
 
@@ -87,12 +85,9 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
   private final Daemon checkpointer;
   private final SimpleStateMachineStorage storage = new SimpleStateMachineStorage();
   private final RaftProperties properties = new RaftProperties();
-  private long segmentMaxSize =
-      RaftServerConfigKeys.Log.segmentSizeMax(properties).getSize();
-  private long preallocatedSize =
-      RaftServerConfigKeys.Log.preallocatedSize(properties).getSize();
-  private int bufferSize =
-      RaftServerConfigKeys.Log.writeBufferSize(properties).getSizeInt();
+  private final long segmentMaxSize = RaftServerConfigKeys.Log.segmentSizeMax(properties).getSize();
+  private final long preallocatedSize = RaftServerConfigKeys.Log.preallocatedSize(properties).getSize();
+  private final int bufferSize = RaftServerConfigKeys.Log.writeBufferSize(properties).getSizeInt();
 
   private volatile boolean running = true;
 
@@ -148,10 +143,17 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
       future.complete(null);
     }
 
+    CompletableFuture<Void> getFuture(Type type) {
+      return maps.getOrDefault(type, CompletableFuture.completedFuture(null));
+    }
+
     void await(Type type) {
       try {
-        maps.getOrDefault(type, CompletableFuture.completedFuture(null)).get();
-      } catch(InterruptedException | ExecutionException e) {
+        getFuture(type).get();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("Failed to await " + type, e);
+      } catch(ExecutionException e) {
         throw new IllegalStateException("Failed to await " + type, e);
       }
     }
@@ -159,7 +161,7 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
 
   private final Blocking blocking = new Blocking();
   private final Collecting collecting = new Collecting();
-  private long endIndexLastCkpt = RaftServerConstants.INVALID_LOG_INDEX;
+  private long endIndexLastCkpt = RaftLog.INVALID_LOG_INDEX;
   private volatile RoleInfoProto slownessInfo = null;
   private volatile RoleInfoProto leaderElectionTimeoutInfo = null;
 
@@ -174,7 +176,8 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
 
         try {
           TimeUnit.SECONDS.sleep(1);
-        } catch(InterruptedException ignored) {
+        } catch (InterruptedException ignored) {
+          Thread.currentThread().interrupt();
         }
       }
     });
@@ -199,7 +202,7 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
     dataMap.put(s, entry);
     LOG.info("{}: put {}, {} -> {}", getId(), entry.getIndex(),
         s.length() <= 10? s: s.substring(0, 10) + "...",
-        ServerProtoUtils.toLogEntryString(entry));
+        LogProtoUtils.toLogEntryString(entry));
   }
 
   @Override
@@ -230,6 +233,10 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
   public synchronized void reinitialize() throws IOException {
     LOG.info("Reinitializing " + this);
     loadSnapshot(storage.findLatestSnapshot());
+    if (getLifeCycleState() == LifeCycle.State.PAUSED) {
+      getLifeCycle().transition(LifeCycle.State.STARTING);
+      getLifeCycle().transition(LifeCycle.State.RUNNING);
+    }
   }
 
   @Override
@@ -246,7 +253,7 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
   public long takeSnapshot() {
     final TermIndex termIndex = getLastAppliedTermIndex();
     if (termIndex.getTerm() <= 0 || termIndex.getIndex() <= 0) {
-      return RaftServerConstants.INVALID_LOG_INDEX;
+      return RaftLog.INVALID_LOG_INDEX;
     }
     final long endIndex = termIndex.getIndex();
 
@@ -297,7 +304,7 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
     if (snapshot == null || !snapshot.getFile().getPath().toFile().exists()) {
       LOG.info("The snapshot file {} does not exist",
           snapshot == null ? null : snapshot.getFile());
-      return RaftServerConstants.INVALID_LOG_INDEX;
+      return RaftLog.INVALID_LOG_INDEX;
     } else {
       LOG.info("Loading snapshot {}", snapshot);
       final long endIndex = snapshot.getIndex();
@@ -360,21 +367,19 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
   }
 
   @Override
-  public CompletableFuture<?> writeStateMachineData(LogEntryProto entry) {
-    blocking.await(Blocking.Type.WRITE_STATE_MACHINE_DATA);
-    return CompletableFuture.completedFuture(null);
+  public CompletableFuture<Void> write(LogEntryProto entry) {
+    return blocking.getFuture(Blocking.Type.WRITE_STATE_MACHINE_DATA);
   }
 
   @Override
-  public CompletableFuture<ByteString> readStateMachineData(LogEntryProto entry) {
-    blocking.await(Blocking.Type.READ_STATE_MACHINE_DATA);
-    return CompletableFuture.completedFuture(STATE_MACHINE_DATA);
+  public CompletableFuture<ByteString> read(LogEntryProto entry) {
+    return blocking.getFuture(Blocking.Type.READ_STATE_MACHINE_DATA)
+        .thenApply(v -> STATE_MACHINE_DATA);
   }
 
   @Override
-  public CompletableFuture<Void> flushStateMachineData(long index) {
-    blocking.await(Blocking.Type.FLUSH_STATE_MACHINE_DATA);
-    return CompletableFuture.completedFuture(null);
+  public CompletableFuture<Void> flush(long index) {
+    return blocking.getFuture(Blocking.Type.FLUSH_STATE_MACHINE_DATA);
   }
 
   @Override
@@ -411,7 +416,7 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
   }
 
   @Override
-  public void notifySlowness(RoleInfoProto roleInfoProto) {
+  public void notifyFollowerSlowness(RoleInfoProto roleInfoProto) {
     LOG.info("{}: notifySlowness {}, {}", this, groupId, roleInfoProto);
     slownessInfo = roleInfoProto;
   }
@@ -420,12 +425,6 @@ public class SimpleStateMachine4Testing extends BaseStateMachine {
   public void notifyExtendedNoLeader(RoleInfoProto roleInfoProto) {
     LOG.info("{}: notifyExtendedNoLeader {}, {}", this, groupId, roleInfoProto);
     leaderElectionTimeoutInfo = roleInfoProto;
-  }
-
-  @Override
-  public void notifyNotLeader(Collection<TransactionContext> pendingEntries)
-      throws IOException {
-
   }
 
   @Override

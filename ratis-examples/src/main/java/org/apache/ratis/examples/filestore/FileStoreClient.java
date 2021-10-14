@@ -18,19 +18,23 @@
 package org.apache.ratis.examples.filestore;
 
 import org.apache.ratis.client.RaftClient;
+import org.apache.ratis.client.api.DataStreamOutput;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.ExamplesProtos.DeleteReplyProto;
 import org.apache.ratis.proto.ExamplesProtos.DeleteRequestProto;
 import org.apache.ratis.proto.ExamplesProtos.FileStoreRequestProto;
 import org.apache.ratis.proto.ExamplesProtos.ReadReplyProto;
 import org.apache.ratis.proto.ExamplesProtos.ReadRequestProto;
+import org.apache.ratis.proto.ExamplesProtos.StreamWriteRequestProto;
 import org.apache.ratis.proto.ExamplesProtos.WriteReplyProto;
 import org.apache.ratis.proto.ExamplesProtos.WriteRequestHeaderProto;
 import org.apache.ratis.proto.ExamplesProtos.WriteRequestProto;
 import org.apache.ratis.protocol.Message;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftGroup;
-import org.apache.ratis.protocol.StateMachineException;
+import org.apache.ratis.protocol.RaftPeer;
+import org.apache.ratis.protocol.RoutingTable;
+import org.apache.ratis.protocol.exceptions.StateMachineException;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.Preconditions;
@@ -57,6 +61,15 @@ public class FileStoreClient implements Closeable {
     this.client = RaftClient.newBuilder()
         .setProperties(properties)
         .setRaftGroup(group)
+        .build();
+  }
+
+  public FileStoreClient(RaftGroup group, RaftProperties properties, RaftPeer primaryDataStreamServer)
+      throws IOException {
+    this.client = RaftClient.newBuilder()
+        .setProperties(properties)
+        .setRaftGroup(group)
+        .setPrimaryDataStreamServer(primaryDataStreamServer)
         .build();
   }
 
@@ -95,19 +108,19 @@ public class FileStoreClient implements Closeable {
   }
 
   private ByteString send(ByteString request) throws IOException {
-    return send(request, client::send);
+    return send(request, client.io()::send);
   }
 
   private ByteString sendReadOnly(ByteString request) throws IOException {
-    return send(request, client::sendReadOnly);
+    return send(request, client.io()::sendReadOnly);
   }
 
   private CompletableFuture<ByteString> sendAsync(ByteString request) {
-    return sendAsync(request, client::sendAsync);
+    return sendAsync(request, client.async()::send);
   }
 
   private CompletableFuture<ByteString> sendReadOnlyAsync(ByteString request) {
-    return sendAsync(request, client::sendReadOnlyAsync);
+    return sendAsync(request, client.async()::sendReadOnly);
   }
 
   public ByteString read(String path, long offset, long length) throws IOException {
@@ -133,29 +146,39 @@ public class FileStoreClient implements Closeable {
     return sendReadOnlyFunction.apply(read.toByteString());
   }
 
-  public long write(String path, long offset, boolean close, ByteBuffer buffer)
+  public long write(String path, long offset, boolean close, ByteBuffer buffer, boolean sync)
       throws IOException {
     final int chunkSize = FileStoreCommon.getChunkSize(buffer.remaining());
     buffer.limit(chunkSize);
-    final ByteString reply = writeImpl(this::send, path, offset, close, buffer);
+    final ByteString reply = writeImpl(this::send, path, offset, close, buffer, sync);
     return WriteReplyProto.parseFrom(reply).getLength();
   }
 
-  public CompletableFuture<Long> writeAsync(String path, long offset, boolean close, ByteBuffer buffer) {
-    return writeImpl(this::sendAsync, path, offset, close, buffer
+  public DataStreamOutput getStreamOutput(String path, long dataSize, RoutingTable routingTable) {
+    final StreamWriteRequestProto header = StreamWriteRequestProto.newBuilder()
+        .setPath(ProtoUtils.toByteString(path))
+        .setLength(dataSize)
+        .build();
+    final FileStoreRequestProto request = FileStoreRequestProto.newBuilder().setStream(header).build();
+    return client.getDataStreamApi().stream(request.toByteString().asReadOnlyByteBuffer(), routingTable);
+  }
+
+  public CompletableFuture<Long> writeAsync(String path, long offset, boolean close, ByteBuffer buffer, boolean sync) {
+    return writeImpl(this::sendAsync, path, offset, close, buffer, sync
     ).thenApply(reply -> JavaUtils.supplyAndWrapAsCompletionException(
         () -> WriteReplyProto.parseFrom(reply).getLength()));
   }
 
   private static <OUTPUT, THROWABLE extends Throwable> OUTPUT writeImpl(
       CheckedFunction<ByteString, OUTPUT, THROWABLE> sendFunction,
-      String path, long offset, boolean close, ByteBuffer data)
+      String path, long offset, boolean close, ByteBuffer data, boolean sync)
       throws THROWABLE {
     final WriteRequestHeaderProto.Builder header = WriteRequestHeaderProto.newBuilder()
         .setPath(ProtoUtils.toByteString(path))
         .setOffset(offset)
-        .setLength(data.position())
-        .setClose(close);
+        .setLength(data.remaining())
+        .setClose(close)
+        .setSync(sync);
 
     final WriteRequestProto.Builder write = WriteRequestProto.newBuilder()
         .setHeader(header)

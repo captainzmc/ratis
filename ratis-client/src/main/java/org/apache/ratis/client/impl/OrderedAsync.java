@@ -23,13 +23,14 @@ import org.apache.ratis.client.impl.RaftClientImpl.PendingClientRequest;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.RaftProtos.RaftClientRequestProto.TypeCase;
 import org.apache.ratis.proto.RaftProtos.SlidingWindowEntry;
-import org.apache.ratis.protocol.GroupMismatchException;
+import org.apache.ratis.protocol.exceptions.GroupMismatchException;
 import org.apache.ratis.protocol.Message;
-import org.apache.ratis.protocol.NotLeaderException;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.apache.ratis.retry.RetryPolicy;
+import org.apache.ratis.rpc.CallId;
 import org.apache.ratis.util.IOUtils;
 import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.Preconditions;
@@ -152,17 +153,18 @@ public final class OrderedAsync {
   }
 
   CompletableFuture<RaftClientReply> send(RaftClientRequest.Type type, Message message, RaftPeerId server) {
-    if (!type.is(TypeCase.WATCH) && !type.is(TypeCase.STREAM)) {
+    if (!type.is(TypeCase.WATCH) && !type.is(TypeCase.MESSAGESTREAM)) {
       Objects.requireNonNull(message, "message == null");
     }
     try {
       requestSemaphore.acquire();
     } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
       return JavaUtils.completeExceptionally(IOUtils.toInterruptedIOException(
           "Interrupted when sending " + type + ", message=" + message, e));
     }
 
-    final long callId = RaftClientImpl.nextCallId();
+    final long callId = CallId.getAndIncrement();
     final LongFunction<PendingOrderedRequest> constructor = seqNum -> new PendingOrderedRequest(callId, seqNum,
         slidingWindowEntry -> client.newRaftClientRequest(server, callId, message, type, slidingWindowEntry));
     return getSlidingWindow(server).submitNewRequest(constructor, this::sendRequestWithRetry
@@ -191,6 +193,7 @@ public final class OrderedAsync {
       if (reply == null) {
         scheduleWithTimeout(pending, request, retryPolicy, null);
       } else {
+        client.handleReply(request, reply);
         f.complete(reply);
       }
     }).exceptionally(e -> {

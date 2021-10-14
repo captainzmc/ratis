@@ -17,6 +17,8 @@
  */
 package org.apache.ratis.protocol;
 
+import org.apache.ratis.util.JavaUtils;
+
 public final class GroupManagementRequest extends RaftClientRequest {
   public abstract static class Op {
     public abstract RaftGroupId getGroupId();
@@ -40,17 +42,20 @@ public final class GroupManagementRequest extends RaftClientRequest {
 
     @Override
     public String toString() {
-      return getClass().getSimpleName() + ":" + getGroup();
+      return JavaUtils.getClassSimpleName(getClass()) + ":" + getGroup();
     }
   }
 
   public static class Remove extends Op {
     private final RaftGroupId groupId;
     private final boolean deleteDirectory;
+    private final boolean renameDirectory;
 
-    public Remove(RaftGroupId groupId, boolean deleteDirectory) {
+    public Remove(RaftGroupId groupId, boolean deleteDirectory,
+        boolean renameDirectory) {
       this.groupId = groupId;
       this.deleteDirectory = deleteDirectory;
+      this.renameDirectory = renameDirectory;
     }
 
     @Override
@@ -62,9 +67,15 @@ public final class GroupManagementRequest extends RaftClientRequest {
       return deleteDirectory;
     }
 
+    public boolean isRenameDirectory() {
+      return renameDirectory;
+    }
+
     @Override
     public String toString() {
-      return getClass().getSimpleName() + ":" + getGroupId() + ", " + (deleteDirectory? "delete": "retain") + "-dir";
+      return JavaUtils.getClassSimpleName(getClass()) + ":" + getGroupId() + ", "
+          + (deleteDirectory? "delete": (renameDirectory ? "rename" : "retain"))
+          + "-dir";
     }
   }
 
@@ -73,14 +84,15 @@ public final class GroupManagementRequest extends RaftClientRequest {
   }
 
   public static GroupManagementRequest newRemove(ClientId clientId, RaftPeerId serverId, long callId,
-      RaftGroupId groupId, boolean deleteDirectory) {
-    return new GroupManagementRequest(clientId, serverId, callId, new Remove(groupId, deleteDirectory));
+      RaftGroupId groupId, boolean deleteDirectory, boolean renameDirectory) {
+    return new GroupManagementRequest(clientId, serverId, callId,
+        new Remove(groupId, deleteDirectory, renameDirectory));
   }
 
   private final Op op;
 
   private GroupManagementRequest(ClientId clientId, RaftPeerId serverId, long callId, Op op) {
-    super(clientId, serverId, op.getGroupId(), callId, writeRequestType());
+    super(clientId, serverId, op.getGroupId(), callId, false, writeRequestType());
     this.op = op;
   }
 

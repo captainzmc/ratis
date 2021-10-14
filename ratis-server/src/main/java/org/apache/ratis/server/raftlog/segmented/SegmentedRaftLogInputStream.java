@@ -17,8 +17,6 @@
  */
 package org.apache.ratis.server.raftlog.segmented;
 
-import static org.apache.ratis.server.impl.RaftServerConstants.INVALID_LOG_INDEX;
-
 import java.io.Closeable;
 import java.io.EOFException;
 import java.io.File;
@@ -26,12 +24,14 @@ import java.io.IOException;
 import java.util.Optional;
 
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
-import org.apache.ratis.server.metrics.RaftLogMetrics;
+import org.apache.ratis.server.metrics.SegmentedRaftLogMetrics;
 import org.apache.ratis.util.IOUtils;
 import org.apache.ratis.util.OpenCloseState;
 import org.apache.ratis.util.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.apache.ratis.server.raftlog.RaftLog.INVALID_LOG_INDEX;
 
 public class SegmentedRaftLogInputStream implements Closeable {
   static final Logger LOG = LoggerFactory.getLogger(SegmentedRaftLogInputStream.class);
@@ -66,14 +66,14 @@ public class SegmentedRaftLogInputStream implements Closeable {
   private final boolean isOpen;
   private final OpenCloseState state;
   private SegmentedRaftLogReader reader;
-  private RaftLogMetrics raftLogMetrics;
+  private final SegmentedRaftLogMetrics raftLogMetrics;
 
   public SegmentedRaftLogInputStream(File log, long startIndex, long endIndex, boolean isOpen) {
     this(log, startIndex, endIndex, isOpen, null);
   }
 
   SegmentedRaftLogInputStream(File log, long startIndex, long endIndex, boolean isOpen,
-                                      RaftLogMetrics raftLogMetrics) {
+      SegmentedRaftLogMetrics raftLogMetrics) {
     if (isOpen) {
       Preconditions.assertTrue(endIndex == INVALID_LOG_INDEX);
     } else {
@@ -118,7 +118,7 @@ public class SegmentedRaftLogInputStream implements Closeable {
     if (state.isUnopened()) {
         try {
           init();
-        } catch (Throwable e) {
+        } catch (Exception e) {
           LOG.error("caught exception initializing " + this, e);
           throw IOUtils.asIOException(e);
         }
@@ -130,7 +130,7 @@ public class SegmentedRaftLogInputStream implements Closeable {
         if (entry != null) {
           long index = entry.getIndex();
           if (!isOpen() && index >= endIndex) {
-            /**
+            /*
              * The end index may be derived from the segment recovery
              * process. It is possible that we still have some uncleaned garbage
              * in the end. We should skip them.
@@ -240,10 +240,10 @@ public class SegmentedRaftLogInputStream implements Closeable {
         } else {
           hitError = false;
         }
-      } catch (Throwable t) {
+      } catch (Exception e) {
         LOG.warn("Caught exception after scanning through {} ops from {}"
             + " while determining its valid length. Position was "
-            + lastPos, numValid, in, t);
+            + lastPos, numValid, in, e);
         hitError = true;
         continue;
       }

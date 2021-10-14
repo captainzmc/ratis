@@ -19,18 +19,22 @@ package org.apache.ratis.server.impl;
 
 import org.apache.log4j.Level;
 import org.apache.ratis.BaseTest;
-import org.apache.ratis.MiniRaftCluster;
 import org.apache.ratis.RaftTestUtil;
 import org.apache.ratis.client.RaftClient;
+import org.apache.ratis.client.api.GroupManagementApi;
 import org.apache.ratis.conf.RaftProperties;
-import org.apache.ratis.protocol.AlreadyExistsException;
+import org.apache.ratis.protocol.exceptions.AlreadyExistsException;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftGroup;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
+import org.apache.ratis.server.RaftServer;
+import org.apache.ratis.server.RaftServerConfigKeys;
+import org.apache.ratis.util.FileUtils;
 import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.Log4jUtils;
+import org.apache.ratis.util.TimeDuration;
 import org.apache.ratis.util.function.CheckedBiConsumer;
 import org.junit.Assert;
 import org.junit.Test;
@@ -39,29 +43,131 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.Random;
 import java.util.stream.Collectors;
 
 public abstract class GroupManagementBaseTest extends BaseTest {
   static final Logger LOG = LoggerFactory.getLogger(GroupManagementBaseTest.class);
 
   {
-    Log4jUtils.setLogLevel(RaftServerProxy.LOG, Level.DEBUG);
-    Log4jUtils.setLogLevel(RaftServerImpl.LOG, Level.DEBUG);
+    Log4jUtils.setLogLevel(RaftServer.LOG, Level.DEBUG);
+    Log4jUtils.setLogLevel(RaftServer.Division.LOG, Level.DEBUG);
     Log4jUtils.setLogLevel(RaftClient.LOG, Level.DEBUG);
   }
 
   static final RaftProperties prop = new RaftProperties();
 
+  static {
+    // avoid flaky behaviour in CI environment
+    RaftServerConfigKeys.Rpc.setTimeoutMin(prop, TimeDuration.valueOf(300, TimeUnit.MILLISECONDS));
+    RaftServerConfigKeys.Rpc.setTimeoutMax(prop, TimeDuration.valueOf(600, TimeUnit.MILLISECONDS));
+  }
+
   public abstract MiniRaftCluster.Factory<? extends MiniRaftCluster> getClusterFactory();
 
-  public MiniRaftCluster getCluster(int peerNum) throws IOException {
+  public MiniRaftCluster getCluster(int peerNum) {
     return getClusterFactory().newCluster(peerNum, prop);
+  }
+
+  @Test
+  public void testGroupWithPriority() throws Exception {
+    final MiniRaftCluster cluster = getCluster(0);
+    LOG.info("Start testMultiGroup" + cluster.printServers());
+
+    // Start server with null group
+    final List<RaftPeerId> ids = Arrays.stream(MiniRaftCluster.generateIds(3, 0))
+        .map(RaftPeerId::valueOf).collect(Collectors.toList());
+    ids.forEach(id -> cluster.putNewServer(id, null, true));
+    LOG.info("putNewServer: " + cluster.printServers());
+
+    cluster.start();
+
+    // Make sure that there are no leaders.
+    TimeUnit.SECONDS.sleep(1);
+    LOG.info("start: " + cluster.printServers());
+    Assert.assertNull(cluster.getLeader());
+
+    // Add groups
+    List<RaftPeer> peers = cluster.getPeers();
+    Random r = new Random(1);
+    final int suggestedLeaderIndex = r.nextInt(peers.size());
+    List<RaftPeer> peersWithPriority = getPeersWithPriority(peers, peers.get(suggestedLeaderIndex));
+    final RaftGroup newGroup = RaftGroup.valueOf(RaftGroupId.randomId(), peersWithPriority);
+    LOG.info("add new group: " + newGroup);
+    try (final RaftClient client = cluster.createClient(newGroup)) {
+      // Before request, client try leader with the highest priority
+      Assert.assertTrue(client.getLeaderId() == peersWithPriority.get(suggestedLeaderIndex).getId());
+      for (RaftPeer p : newGroup.getPeers()) {
+        client.getGroupManagementApi(p.getId()).add(newGroup);
+      }
+    }
+
+    JavaUtils.attempt(() -> {
+      final RaftServer.Division leader = RaftTestUtil.waitForLeader(cluster, newGroup.getGroupId());
+      Assert.assertTrue(leader.getId() == peers.get(suggestedLeaderIndex).getId());
+    }, 10, TimeDuration.valueOf(1, TimeUnit.SECONDS), "testMultiGroupWithPriority", LOG);
+
+    String suggestedLeader = peers.get(suggestedLeaderIndex).getId().toString();
+
+    // isolate leader, then follower will trigger leader election.
+    // Because leader was isolated, so leader can not vote, and candidate wait timeout,
+    // then if candidate get majority, candidate can pass vote
+    BlockRequestHandlingInjection.getInstance().blockRequestor(suggestedLeader);
+    BlockRequestHandlingInjection.getInstance().blockReplier(suggestedLeader);
+    cluster.setBlockRequestsFrom(suggestedLeader, true);
+
+    JavaUtils.attempt(() -> {
+      final RaftServer.Division leader = RaftTestUtil.waitForLeader(cluster, newGroup.getGroupId());
+      Assert.assertTrue(leader.getId() != peers.get(suggestedLeaderIndex).getId());
+    }, 10, TimeDuration.valueOf(1, TimeUnit.SECONDS), "testMultiGroupWithPriority", LOG);
+
+    // send request so that suggested leader's log lag behind new leader's,
+    // when suggested leader rejoin cluster, it will catch up log first.
+    try (final RaftClient client = cluster.createClient(newGroup)) {
+      for (int i = 0; i < 10; i ++) {
+        RaftClientReply reply = client.io().send(new RaftTestUtil.SimpleMessage("m" + i));
+        Assert.assertTrue(reply.isSuccess());
+      }
+    }
+
+    BlockRequestHandlingInjection.getInstance().unblockRequestor(suggestedLeader);
+    BlockRequestHandlingInjection.getInstance().unblockReplier(suggestedLeader);
+    cluster.setBlockRequestsFrom(suggestedLeader, false);
+
+    // suggested leader with highest priority rejoin cluster, then current leader will yield
+    // leadership to suggested leader when suggested leader catch up the log.
+    JavaUtils.attempt(() -> {
+      final RaftServer.Division leader = RaftTestUtil.waitForLeader(cluster, newGroup.getGroupId());
+      Assert.assertTrue(leader.getId() == peers.get(suggestedLeaderIndex).getId());
+    }, 10, TimeDuration.valueOf(1, TimeUnit.SECONDS), "testMultiGroupWithPriority", LOG);
+
+    // change the suggest leader
+    final int newSuggestedLeaderIndex = (suggestedLeaderIndex + 1) % peersWithPriority.size();
+    List<RaftPeer> peersWithNewPriority = getPeersWithPriority(peers, peers.get(newSuggestedLeaderIndex));
+    try (final RaftClient client = cluster.createClient(newGroup)) {
+      RaftClientReply reply = client.admin().setConfiguration(peersWithNewPriority.toArray(new RaftPeer[0]));
+      Assert.assertTrue(reply.isSuccess());
+    }
+
+    JavaUtils.attempt(() -> {
+      final RaftServer.Division leader = RaftTestUtil.waitForLeader(cluster, newGroup.getGroupId());
+      Assert.assertTrue(leader.getId() == peers.get(newSuggestedLeaderIndex).getId());
+    }, 10, TimeDuration.valueOf(1, TimeUnit.SECONDS), "testMultiGroupWithPriority", LOG);
+
+    cluster.killServer(peers.get(newSuggestedLeaderIndex).getId());
+    JavaUtils.attempt(() -> {
+      final RaftServer.Division leader = RaftTestUtil.waitForLeader(cluster, newGroup.getGroupId());
+      Assert.assertTrue(leader.getId() != peers.get(newSuggestedLeaderIndex).getId());
+    }, 10, TimeDuration.valueOf(1, TimeUnit.SECONDS), "testMultiGroupWithPriority", LOG);
+
+    cluster.shutdown();
   }
 
   @Test
@@ -85,9 +191,10 @@ public abstract class GroupManagementBaseTest extends BaseTest {
     // Add groups
     final RaftGroup newGroup = RaftGroup.valueOf(RaftGroupId.randomId(), cluster.getPeers());
     LOG.info("add new group: " + newGroup);
-    final RaftClient client = cluster.createClient(newGroup);
-    for(RaftPeer p : newGroup.getPeers()) {
-      client.groupAdd(newGroup, p.getId());
+    try (final RaftClient client = cluster.createClient(newGroup)) {
+      for (RaftPeer p : newGroup.getPeers()) {
+        client.getGroupManagementApi(p.getId()).add(newGroup);
+      }
     }
     Assert.assertNotNull(RaftTestUtil.waitForLeader(cluster));
     TimeUnit.SECONDS.sleep(1);
@@ -136,7 +243,7 @@ public abstract class GroupManagementBaseTest extends BaseTest {
     if (chosen < 0) {
       chosen = ThreadLocalRandom.current().nextInt(idIndex.length);
     }
-    final String type = cluster.getClass().getSimpleName()
+    final String type = JavaUtils.getClassSimpleName(cluster.getClass())
         + Arrays.toString(idIndex) + "chosen=" + chosen;
     LOG.info("\n\nrunMultiGroupTest with " + type + ": " + cluster.printServers());
 
@@ -170,7 +277,7 @@ public abstract class GroupManagementBaseTest extends BaseTest {
       LOG.info(i + ") starting " + groups[i]);
       for(RaftPeer p : peers) {
         try(final RaftClient client = cluster.createClient(p.getId(), emptyGroup)) {
-          client.groupAdd(groups[i], p.getId());
+          client.getGroupManagementApi(p.getId()).add(groups[i]);
         }
       }
       Assert.assertNotNull(RaftTestUtil.waitForLeader(cluster, gid));
@@ -187,13 +294,14 @@ public abstract class GroupManagementBaseTest extends BaseTest {
         final RaftGroup g = groups[i];
         LOG.info(i + ") close " + cluster.printServers(g.getGroupId()));
         for(RaftPeer p : g.getPeers()) {
-          final File root = cluster.getServer(p.getId()).getImpl(g.getGroupId()).getState().getStorage().getStorageDir().getRoot();
+          final RaftServer.Division d = cluster.getDivision(p.getId(), g.getGroupId());
+          final File root = d.getRaftStorage().getStorageDir().getRoot();
           Assert.assertTrue(root.exists());
           Assert.assertTrue(root.isDirectory());
 
           final RaftClientReply r;
           try (final RaftClient client = cluster.createClient(p.getId(), g)) {
-            r = client.groupRemove(g.getGroupId(), true, p.getId());
+            r = client.getGroupManagementApi(p.getId()).remove(g.getGroupId(), true, false);
           }
           Assert.assertTrue(r.isSuccess());
           Assert.assertFalse(root.exists());
@@ -210,14 +318,14 @@ public abstract class GroupManagementBaseTest extends BaseTest {
         LOG.info(i + ") groupAdd: " + cluster.printServers(groups[i].getGroupId()));
         for (RaftPeer p : groups[i].getPeers()) {
           try (final RaftClient client = cluster.createClient(p.getId(), groups[i])) {
-            client.groupAdd(newGroup, p.getId());
+            client.getGroupManagementApi(p.getId()).add(newGroup);
           }
         }
       }
     }
     LOG.info(chosen + ") setConfiguration: " + cluster.printServers(groups[chosen].getGroupId()));
     try (final RaftClient client = cluster.createClient(groups[chosen])) {
-      client.setConfiguration(allPeers.toArray(RaftPeer.emptyArray()));
+      client.admin().setConfiguration(allPeers.toArray(RaftPeer.emptyArray()));
     }
 
     Assert.assertNotNull(RaftTestUtil.waitForLeader(cluster));
@@ -241,16 +349,107 @@ public abstract class GroupManagementBaseTest extends BaseTest {
     final RaftPeer peer = cluster.getPeers().get(0);
     final RaftPeerId peerId = peer.getId();
     final RaftGroup group = RaftGroup.valueOf(cluster.getGroupId(), peer);
-    final RaftClient client = cluster.createClient();
-    Assert.assertEquals(group, cluster.getRaftServerImpl(peerId).getGroup());
-    try {
-      client.groupAdd(group, peer.getId());
-    } catch (IOException ex) {
-      // HadoopRPC throws RemoteException, which makes it hard to check if
-      // the exception is instance of AlreadyExistsException
-      Assert.assertTrue(ex.toString().contains(AlreadyExistsException.class.getCanonicalName()));
+    try (final RaftClient client = cluster.createClient()) {
+      Assert.assertEquals(group, cluster.getDivision(peerId).getGroup());
+      try {
+        client.getGroupManagementApi(peer.getId()).add(group);
+      } catch (IOException ex) {
+        // HadoopRPC throws RemoteException, which makes it hard to check if
+        // the exception is instance of AlreadyExistsException
+        Assert.assertTrue(ex.toString().contains(AlreadyExistsException.class.getCanonicalName()));
+      }
+      Assert.assertEquals(group, cluster.getDivision(peerId).getGroup());
+      cluster.shutdown();
     }
-    Assert.assertEquals(group, cluster.getRaftServerImpl(peerId).getGroup());
-    cluster.shutdown();
   }
+
+  @Test
+  public void testGroupRemoveWhenRename() throws Exception {
+    final MiniRaftCluster cluster1 = getCluster(1);
+    RaftServerConfigKeys.setRemovedGroupsDir(cluster1.getProperties(),
+        Files.createTempDirectory("groups").toFile());
+    final MiniRaftCluster cluster2 = getCluster(3);
+    cluster1.start();
+    final RaftPeer peer1 = cluster1.getPeers().get(0);
+    final RaftPeerId peerId1 = peer1.getId();
+    final RaftGroup group1 = RaftGroup.valueOf(cluster1.getGroupId(), peer1);
+    final RaftGroup group2 = RaftGroup.valueOf(cluster2.getGroupId(), peer1);
+    try (final RaftClient client = cluster1.createClient()) {
+      Assert.assertEquals(group1, cluster1.getDivision(peerId1).getGroup());
+      try {
+
+        // Group2 is added to one of the peers in Group1
+        final GroupManagementApi api1 = client.getGroupManagementApi(peerId1);
+        api1.add(group2);
+        List<RaftGroupId> groupIds1 = cluster1.getServer(peerId1).getGroupIds();
+        Assert.assertEquals(groupIds1.size(), 2);
+
+        // Group2 is renamed from the peer1 of Group1
+        api1.remove(group2.getGroupId(), false, true);
+
+        groupIds1 = cluster1.getServer(peerId1).getGroupIds();
+        Assert.assertEquals(groupIds1.size(), 1);
+        cluster1.restart(false);
+
+        List<RaftGroupId> groupIdsAfterRestart =
+            cluster1.getServer(peerId1).getGroupIds();
+        Assert.assertEquals(groupIds1.size(), groupIdsAfterRestart.size());
+
+        File renamedGroup = new File(RaftServerConfigKeys.removedGroupsDir(
+            cluster1.getProperties()), group2.getGroupId().getUuid().toString());
+        Assert.assertTrue(renamedGroup.isDirectory());
+
+      } catch (IOException ex) {
+        Assert.fail();
+      } finally {
+        cluster1.shutdown();
+        // Clean up
+        FileUtils.deleteFully(RaftServerConfigKeys.removedGroupsDir(
+            cluster1.getProperties()));
+      }
+    }
+  }
+
+  @Test
+  public void testGroupRemoveWhenDelete() throws Exception {
+    final MiniRaftCluster cluster1 = getCluster(1);
+        RaftServerConfigKeys.setRemovedGroupsDir(cluster1.getProperties(),
+            Files.createTempDirectory("groups").toFile());
+    final MiniRaftCluster cluster2 = getCluster(3);
+    cluster1.start();
+    final RaftPeer peer1 = cluster1.getPeers().get(0);
+    final RaftPeerId peerId1 = peer1.getId();
+    final RaftGroup group1 = RaftGroup.valueOf(cluster1.getGroupId(), peer1);
+    final RaftGroup group2 = RaftGroup.valueOf(cluster2.getGroupId(), peer1);
+    try (final RaftClient client = cluster1.createClient()) {
+      Assert.assertEquals(group1,
+          cluster1.getDivision(peerId1).getGroup());
+      try {
+
+        // Group2 is added again to one of the peers in Group1
+        final GroupManagementApi api1 = client.getGroupManagementApi(peerId1);
+        api1.add(group2);
+        List<RaftGroupId> groupIds1 = cluster1.getServer(peerId1).getGroupIds();
+        Assert.assertEquals(groupIds1.size(), 2);
+
+        // Group2 is deleted from the peer1 of Group1
+        api1.remove(group2.getGroupId(), true, false);
+
+        groupIds1 = cluster1.getServer(peerId1).getGroupIds();
+        Assert.assertEquals(groupIds1.size(), 1);
+        cluster1.restart(false);
+        List<RaftGroupId> groupIdsAfterRestart =
+            cluster1.getServer(peerId1).getGroupIds();
+        Assert.assertEquals(groupIds1.size(), groupIdsAfterRestart.size());
+
+      } catch (IOException ex) {
+        Assert.fail();
+      } finally {
+        cluster1.shutdown();
+        FileUtils.deleteFully(RaftServerConfigKeys.removedGroupsDir(
+            cluster1.getProperties()));
+      }
+    }
+  }
+
 }

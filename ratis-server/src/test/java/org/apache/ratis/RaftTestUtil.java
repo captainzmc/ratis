@@ -30,10 +30,11 @@ import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
 import org.apache.ratis.server.impl.BlockRequestHandlingInjection;
 import org.apache.ratis.server.impl.DelayLocalExecutionInjection;
-import org.apache.ratis.server.impl.RaftServerImpl;
-import org.apache.ratis.server.impl.ServerProtoUtils;
-import org.apache.ratis.server.protocol.TermIndex;
+import org.apache.ratis.server.impl.MiniRaftCluster;
+import org.apache.ratis.server.raftlog.LogEntryHeader;
+import org.apache.ratis.server.raftlog.LogProtoUtils;
 import org.apache.ratis.server.raftlog.RaftLog;
+import org.apache.ratis.server.raftlog.RaftLogBase;
 import org.apache.ratis.thirdparty.com.google.common.base.Preconditions;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.apache.ratis.util.AutoCloseableLock;
@@ -47,9 +48,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Objects;
@@ -65,23 +66,33 @@ import java.util.function.Function;
 import java.util.function.IntSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
-
+import java.util.stream.StreamSupport;
 
 public interface RaftTestUtil {
   Logger LOG = LoggerFactory.getLogger(RaftTestUtil.class);
 
-  static RaftServerImpl waitForLeader(MiniRaftCluster cluster)
+  static Object getDeclaredField(Object obj, String fieldName) {
+    final Class<?> clazz = obj.getClass();
+    try {
+      final Field f = clazz.getDeclaredField(fieldName);
+      f.setAccessible(true);
+      return f.get(obj);
+    } catch (Exception e) {
+      throw new IllegalStateException("Failed to get '" + fieldName + "' from " + clazz, e);
+    }
+  }
+
+  static RaftServer.Division waitForLeader(MiniRaftCluster cluster)
       throws InterruptedException {
     return waitForLeader(cluster, null);
   }
 
-  static RaftServerImpl waitForLeader(MiniRaftCluster cluster, RaftGroupId groupId)
+  static RaftServer.Division waitForLeader(MiniRaftCluster cluster, RaftGroupId groupId)
       throws InterruptedException {
     return waitForLeader(cluster, groupId, true);
   }
 
-  static RaftServerImpl waitForLeader(
-      MiniRaftCluster cluster, RaftGroupId groupId, boolean expectLeader)
+  static RaftServer.Division waitForLeader(MiniRaftCluster cluster, RaftGroupId groupId, boolean expectLeader)
       throws InterruptedException {
     final String name = "waitForLeader-" + groupId + "-(expectLeader? " + expectLeader + ")";
     final int numAttempts = expectLeader? 100: 10;
@@ -92,14 +103,14 @@ public interface RaftTestUtil {
     final Runnable handleNoLeaders = () -> {
       throw cluster.newIllegalStateExceptionForNoLeaders(groupId);
     };
-    final Consumer<List<RaftServerImpl>> handleMultipleLeaders = leaders -> {
+    final Consumer<List<RaftServer.Division>> handleMultipleLeaders = leaders -> {
       final IllegalStateException ise = cluster.newIllegalStateExceptionForMultipleLeaders(groupId, leaders);
       exception.set(ise);
     };
 
-    final RaftServerImpl leader = JavaUtils.attemptRepeatedly(() -> {
-      RaftServerImpl l = cluster.getLeader(groupId, handleNoLeaders, handleMultipleLeaders);
-      if (l != null && !l.isLeaderReady()) {
+    final RaftServer.Division leader = JavaUtils.attemptRepeatedly(() -> {
+      final RaftServer.Division l = cluster.getLeader(groupId, handleNoLeaders, handleMultipleLeaders);
+      if (l != null && !l.getInfo().isLeaderReady()) {
         throw new IllegalStateException("Leader: "+ l.getMemberId() +  " not ready");
       }
       return l;
@@ -118,7 +129,7 @@ public interface RaftTestUtil {
   }
 
   static RaftPeerId waitAndKillLeader(MiniRaftCluster cluster) throws InterruptedException {
-    final RaftServerImpl leader = waitForLeader(cluster);
+    final RaftServer.Division leader = waitForLeader(cluster);
     Assert.assertNotNull(leader);
 
     LOG.info("killing leader = " + leader);
@@ -149,10 +160,14 @@ public interface RaftTestUtil {
     return logEntriesContains(log, 0L, Long.MAX_VALUE, expectedMessages);
   }
 
+  static boolean logEntriesNotContains(RaftLog log, SimpleMessage... expectedMessages) {
+    return logEntriesNotContains(log, 0L, Long.MAX_VALUE, expectedMessages);
+  }
+
   static boolean logEntriesContains(RaftLog log, long startIndex, long endIndex, SimpleMessage... expectedMessages) {
     int idxEntries = 0;
     int idxExpected = 0;
-    TermIndex[] termIndices = log.getEntries(startIndex, endIndex);
+    final LogEntryHeader[] termIndices = log.getEntries(startIndex, endIndex);
     while (idxEntries < termIndices.length
         && idxExpected < expectedMessages.length) {
       try {
@@ -168,9 +183,32 @@ public interface RaftTestUtil {
     return idxExpected == expectedMessages.length;
   }
 
+  // Check whether raftlog contains any expected message between startIndex and endIndex.
+  // Return true if raftlog does not contain any expected message, returns false otherwise.
+  static boolean logEntriesNotContains(RaftLog log, long startIndex, long endIndex, SimpleMessage... expectedMessages) {
+    int idxEntries = 0;
+    int idxExpected = 0;
+    final LogEntryHeader[] termIndices = log.getEntries(startIndex, endIndex);
+    while (idxEntries < termIndices.length
+        && idxExpected < expectedMessages.length) {
+      try {
+        if (Arrays.equals(expectedMessages[idxExpected].getContent().toByteArray(),
+            log.get(termIndices[idxEntries].getIndex()).getStateMachineLogEntry().getLogData().toByteArray())) {
+          return false;
+        } else {
+          ++idxExpected;
+        }
+      } catch (IOException e) {
+        throw new RuntimeException(e);
+      }
+      ++idxEntries;
+    }
+    return true;
+  }
+
   static void checkLogEntries(RaftLog log, SimpleMessage[] expectedMessages,
       Predicate<LogEntryProto> predicate) {
-    TermIndex[] termIndices = log.getEntries(0, Long.MAX_VALUE);
+    final LogEntryHeader[] termIndices = log.getEntries(0, Long.MAX_VALUE);
     for (int i = 0; i < termIndices.length; i++) {
       for (int j = 0; j < expectedMessages.length; j++) {
         final LogEntryProto e;
@@ -194,9 +232,9 @@ public interface RaftTestUtil {
   }
 
   static void assertLogEntries(MiniRaftCluster cluster, SimpleMessage expectedMessage) {
-    final int size = cluster.getServers().size();
+    final int size = cluster.getNumServers();
     final long count = cluster.getServerAliveStream()
-        .map(s -> s.getState().getLog())
+        .map(RaftServer.Division::getRaftLog)
         .filter(log -> logEntriesContains(log, expectedMessage))
         .count();
     if (2*count <= size) {
@@ -205,9 +243,9 @@ public interface RaftTestUtil {
     }
   }
 
-  static void assertLogEntries(RaftServerImpl server, long expectedTerm, SimpleMessage... expectedMessages) {
+  static void assertLogEntries(RaftServer.Division server, long expectedTerm, SimpleMessage... expectedMessages) {
     LOG.info("checking raft log for {}", server.getMemberId());
-    final RaftLog log = server.getState().getLog();
+    final RaftLog log = server.getRaftLog();
     try {
       RaftTestUtil.assertLogEntries(log, expectedTerm, expectedMessages);
     } catch (AssertionError e) {
@@ -229,7 +267,7 @@ public interface RaftTestUtil {
   static List<LogEntryProto> getStateMachineLogEntries(RaftLog log) {
     final List<LogEntryProto> entries = new ArrayList<>();
     for (LogEntryProto e : getLogEntryProtos(log)) {
-      final String s = ServerProtoUtils.toString(e);
+      final String s = LogProtoUtils.toLogEntryString(e);
       if (e.hasStateMachineLogEntry()) {
         LOG.info(s + ", " + e.getStateMachineLogEntry().toString().trim().replace("\n", ", "));
         entries.add(e);
@@ -248,7 +286,7 @@ public interface RaftTestUtil {
     final List<LogEntryProto> entries = getStateMachineLogEntries(log);
     try {
       assertLogEntries(entries, expectedTerm, expectedMessages);
-    } catch(Throwable t) {
+    } catch(Exception t) {
       throw new AssertionError("entries: " + entries, t);
     }
   }
@@ -336,8 +374,8 @@ public interface RaftTestUtil {
     private SimpleOperation(ClientId clientId, long callId, String op, boolean hasStateMachineData) {
       this.op = Objects.requireNonNull(op);
       final ByteString bytes = ProtoUtils.toByteString(op);
-      this.smLogEntryProto = ServerProtoUtils.toStateMachineLogEntryProto(
-          clientId, callId, bytes, hasStateMachineData? bytes: null);
+      this.smLogEntryProto = LogProtoUtils.toStateMachineLogEntryProto(
+          clientId, callId, StateMachineLogEntryProto.Type.WRITE, bytes, hasStateMachineData? bytes: null);
     }
 
     @Override
@@ -398,8 +436,7 @@ public interface RaftTestUtil {
     }
   }
 
-  static <SERVER extends RaftServer> void blockQueueAndSetDelay(
-      Collection<SERVER> servers,
+  static void blockQueueAndSetDelay(Iterable<RaftServer> servers,
       DelayLocalExecutionInjection injection, String leaderId, int delayMs,
       TimeDuration maxTimeout) throws InterruptedException {
     // block reqeusts sent to leader if delayMs > 0
@@ -413,7 +450,8 @@ public interface RaftTestUtil {
     }
 
     // delay RaftServerRequest for other servers
-    servers.stream().filter(s -> !s.getId().toString().equals(leaderId))
+    StreamSupport.stream(servers.spliterator(), false)
+        .filter(s -> !s.getId().toString().equals(leaderId))
         .forEach(s -> {
           if (block) {
             injection.setDelayMs(s.getId().toString(), delayMs);
@@ -425,16 +463,18 @@ public interface RaftTestUtil {
     Thread.sleep(3 * maxTimeout.toLong(TimeUnit.MILLISECONDS));
   }
 
-  static void sendMessageInNewThread(MiniRaftCluster cluster, RaftPeerId leaderId, SimpleMessage... messages) {
-    new Thread(() -> {
+  static Thread sendMessageInNewThread(MiniRaftCluster cluster, RaftPeerId leaderId, SimpleMessage... messages) {
+    Thread t = new Thread(() -> {
       try (final RaftClient client = cluster.createClient(leaderId)) {
         for (SimpleMessage mssg: messages) {
-          client.send(mssg);
+          client.io().send(mssg);
         }
       } catch (Exception e) {
         e.printStackTrace();
       }
-    }).start();
+    });
+    t.start();
+    return t;
   }
 
   static void assertSameLog(RaftLog expected, RaftLog computed) throws Exception {
@@ -456,7 +496,7 @@ public interface RaftTestUtil {
   }
 
   static LogEntryProto getLastEntry(LogEntryBodyCase targetCase, RaftLog raftLog) throws Exception {
-    try(AutoCloseableLock readLock = raftLog.readLock()) {
+    try(AutoCloseableLock readLock = ((RaftLogBase)raftLog).readLock()) {
       long i = raftLog.getNextIndex() - 1;
       for(; i >= 0; i--) {
         final LogEntryProto entry = raftLog.get(i);

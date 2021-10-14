@@ -1,4 +1,4 @@
-/**
+/*
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -45,7 +45,7 @@ public final class MetricRegistriesLoader {
    * @return A {@link MetricRegistries} implementation.
    */
   public static MetricRegistries load() {
-    List<MetricRegistries> availableImplementations = getDefinedImplemantations();
+    List<MetricRegistries> availableImplementations = getDefinedImplementations();
     return load(availableImplementations);
   }
 
@@ -65,7 +65,7 @@ public final class MetricRegistriesLoader {
       return impl;
     } else if (availableImplementations.isEmpty()) {
       try {
-        return ReflectionUtils.newInstance((Class<MetricRegistries>)Class.forName(DEFAULT_CLASS));
+        return ReflectionUtils.newInstance(Class.forName(DEFAULT_CLASS).asSubclass(MetricRegistries.class));
       } catch (ClassNotFoundException e) {
         throw new RuntimeException(e);
       }
@@ -84,8 +84,10 @@ public final class MetricRegistriesLoader {
     }
   }
 
-  private static List<MetricRegistries> getDefinedImplemantations() {
-    ServiceLoader<MetricRegistries> loader = ServiceLoader.load(MetricRegistries.class);
+  private static List<MetricRegistries> getDefinedImplementations() {
+    ServiceLoader<MetricRegistries> loader = ServiceLoader.load(
+        MetricRegistries.class,
+        MetricRegistries.class.getClassLoader());
     List<MetricRegistries> availableFactories = new ArrayList<>();
     for (MetricRegistries impl : loader) {
       availableFactories.add(impl);

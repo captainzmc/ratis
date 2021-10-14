@@ -17,10 +17,11 @@
  */
 package org.apache.ratis.server.impl;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.RaftProtos.ReplicationLevel;
 import org.apache.ratis.proto.RaftProtos.WatchRequestTypeProto;
-import org.apache.ratis.protocol.NotReplicatedException;
+import org.apache.ratis.protocol.exceptions.NotReplicatedException;
 import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.exceptions.ResourceUnavailableException;
 import org.apache.ratis.server.RaftServerConfigKeys;
@@ -135,6 +136,7 @@ class WatchRequests {
       return true;
     }
 
+    @SuppressFBWarnings("NP_NULL_PARAM_DEREF")
     synchronized void updateIndex(final long newIndex) {
       if (newIndex <= getIndex()) { // compare again synchronized
         return;
@@ -171,7 +173,7 @@ class WatchRequests {
   private final TimeoutScheduler scheduler = TimeoutScheduler.getInstance();
 
   WatchRequests(Object name, RaftProperties properties) {
-    this.name = name + "-" + getClass().getSimpleName();
+    this.name = name + "-" + JavaUtils.getClassSimpleName(getClass());
 
     final TimeDuration watchTimeout = RaftServerConfigKeys.Watch.timeout(properties);
     this.watchTimeoutNanos = watchTimeout.to(TimeUnit.NANOSECONDS);
@@ -185,6 +187,7 @@ class WatchRequests {
     Arrays.stream(ReplicationLevel.values()).forEach(r -> queues.put(r, new WatchQueue(r, elementLimit)));
   }
 
+  @SuppressFBWarnings("NP_NULL_PARAM_DEREF")
   CompletableFuture<Void> add(RaftClientRequest request) {
     final WatchRequestTypeProto watch = request.getType().getWatch();
     final WatchQueue queue = queues.get(watch.getReplication());

@@ -20,17 +20,25 @@ package org.apache.ratis.server.impl;
 import org.apache.ratis.RaftConfigKeys;
 import org.apache.ratis.conf.Parameters;
 import org.apache.ratis.conf.RaftProperties;
+import org.apache.ratis.datastream.SupportedDataStreamType;
 import org.apache.ratis.proto.RaftProtos.AppendEntriesReplyProto;
 import org.apache.ratis.proto.RaftProtos.AppendEntriesRequestProto;
-import org.apache.ratis.proto.RaftProtos.CommitInfoProto;
 import org.apache.ratis.proto.RaftProtos.InstallSnapshotReplyProto;
 import org.apache.ratis.proto.RaftProtos.InstallSnapshotRequestProto;
 import org.apache.ratis.proto.RaftProtos.RaftRpcRequestProto;
 import org.apache.ratis.proto.RaftProtos.RequestVoteReplyProto;
 import org.apache.ratis.proto.RaftProtos.RequestVoteRequestProto;
+import org.apache.ratis.proto.RaftProtos.StartLeaderElectionReplyProto;
+import org.apache.ratis.proto.RaftProtos.StartLeaderElectionRequestProto;
 import org.apache.ratis.protocol.*;
+import org.apache.ratis.protocol.exceptions.AlreadyClosedException;
+import org.apache.ratis.protocol.exceptions.AlreadyExistsException;
+import org.apache.ratis.protocol.exceptions.GroupMismatchException;
 import org.apache.ratis.rpc.RpcType;
+import org.apache.ratis.server.DataStreamServerRpc;
 import org.apache.ratis.server.RaftServer;
+import org.apache.ratis.server.ServerFactory;
+import org.apache.ratis.util.JvmPauseMonitor;
 import org.apache.ratis.server.RaftServerConfigKeys;
 import org.apache.ratis.server.RaftServerRpc;
 import org.apache.ratis.statemachine.StateMachine;
@@ -39,9 +47,8 @@ import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.LifeCycle;
 import org.apache.ratis.util.Preconditions;
 import org.apache.ratis.util.ProtoUtils;
+import org.apache.ratis.util.TimeDuration;
 import org.apache.ratis.util.function.CheckedFunction;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.io.File;
@@ -56,12 +63,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.*;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-public class RaftServerProxy implements RaftServer {
-  public static final Logger LOG = LoggerFactory.getLogger(RaftServerProxy.class);
-
+class RaftServerProxy implements RaftServer {
   /**
    * A map: {@link RaftGroupId} -> {@link RaftServerImpl} futures.
    *
@@ -108,8 +114,22 @@ public class RaftServerProxy implements RaftServer {
         return;
       }
       isClosed = true;
-      map.values().parallelStream().map(CompletableFuture::join)
-          .forEach(impl -> impl.shutdown(false));
+      map.entrySet().parallelStream().forEach(entry -> close(entry.getKey(), entry.getValue()));
+    }
+
+    private void close(RaftGroupId groupId, CompletableFuture<RaftServerImpl> future) {
+      final RaftServerImpl impl;
+      try {
+        impl = future.join();
+      } catch (Throwable t) {
+        LOG.warn("{}: Failed to join the division for {}", getId(), groupId, t);
+        return;
+      }
+      try {
+        impl.close();
+      } catch (Throwable t) {
+        LOG.warn("{}: Failed to close the division for {}", getId(), groupId, t);
+      }
     }
 
     synchronized List<RaftGroupId> getGroupIds() {
@@ -155,6 +175,7 @@ public class RaftServerProxy implements RaftServer {
   }
 
   private final RaftPeerId id;
+  private final Supplier<RaftPeer> peerSupplier = JavaUtils.memoize(this::buildRaftPeer);
   private final RaftProperties properties;
   private final StateMachine.Registry stateMachineRegistry;
   private final LifeCycle lifeCycle;
@@ -162,9 +183,12 @@ public class RaftServerProxy implements RaftServer {
   private final RaftServerRpc serverRpc;
   private final ServerFactory factory;
 
-  private ExecutorService implExecutor;
+  private final DataStreamServerRpc dataStreamServerRpc;
 
   private final ImplMap impls = new ImplMap();
+  private final ExecutorService implExecutor = Executors.newSingleThreadExecutor();
+
+  private final JvmPauseMonitor pauseMonitor;
 
   RaftServerProxy(RaftPeerId id, StateMachine.Registry stateMachineRegistry,
       RaftProperties properties, Parameters parameters) {
@@ -175,10 +199,25 @@ public class RaftServerProxy implements RaftServer {
     this.factory = ServerFactory.cast(rpcType.newFactory(parameters));
 
     this.serverRpc = factory.newRaftServerRpc(this);
-    this.id = id != null? id: RaftPeerId.valueOf(getIdStringFrom(serverRpc));
-    this.lifeCycle = new LifeCycle(this.id + "-" + getClass().getSimpleName());
 
-    this.implExecutor = Executors.newSingleThreadExecutor();
+    this.id = id != null? id: RaftPeerId.valueOf(getIdStringFrom(serverRpc));
+    this.lifeCycle = new LifeCycle(this.id + "-" + JavaUtils.getClassSimpleName(getClass()));
+
+    this.dataStreamServerRpc = new DataStreamServerImpl(this, parameters).getServerRpc();
+
+    final TimeDuration rpcSlownessTimeout = RaftServerConfigKeys.Rpc.slownessTimeout(properties);
+    final TimeDuration leaderStepDownWaitTime = RaftServerConfigKeys.LeaderElection.leaderStepDownWaitTime(properties);
+    this.pauseMonitor = new JvmPauseMonitor(id,
+        extraSleep -> handleJvmPause(extraSleep, rpcSlownessTimeout, leaderStepDownWaitTime));
+  }
+
+  private void handleJvmPause(TimeDuration extraSleep, TimeDuration closeThreshold, TimeDuration stepDownThreshold)
+      throws IOException {
+    if (extraSleep.compareTo(closeThreshold) > 0) {
+      close();
+    } else if (extraSleep.compareTo(stepDownThreshold) > 0) {
+      getImpls().forEach(RaftServerImpl::stepDownOnJvmPause);
+    }
   }
 
   /** Check the storage dir and add groups*/
@@ -194,22 +233,36 @@ public class RaftServerProxy implements RaftServer {
             .forEach(sub -> {
               try {
                 LOG.info("{}: found a subdirectory {}", getId(), sub);
-                final RaftGroupId groupId = RaftGroupId.valueOf(UUID.fromString(sub.getName()));
-                if (!raftGroupId.filter(groupId::equals).isPresent()) {
-                  addGroup(RaftGroup.valueOf(groupId));
+                RaftGroupId groupId = null;
+                try {
+                  groupId = RaftGroupId.valueOf(UUID.fromString(sub.getName()));
+                } catch (Exception e) {
+                  LOG.info("{}: The directory {} is not a group directory;" +
+                      " ignoring it. ", getId(), sub.getAbsolutePath());
                 }
-              } catch (Throwable t) {
+                if (groupId != null) {
+                  if (!raftGroupId.filter(groupId::equals).isPresent()) {
+                    addGroup(RaftGroup.valueOf(groupId));
+                  }
+                }
+              } catch (Exception e) {
                 LOG.warn(getId() + ": Failed to initialize the group directory "
-                    + sub.getAbsolutePath() + ".  Ignoring it", t);
+                    + sub.getAbsolutePath() + ".  Ignoring it", e);
               }
             }));
     raftGroup.ifPresent(this::addGroup);
   }
 
+  void addRaftPeers(Collection<RaftPeer> peers) {
+    final List<RaftPeer> others = peers.stream().filter(p -> !p.getId().equals(getId())).collect(Collectors.toList());
+    getServerRpc().addRaftPeers(others);
+    getDataStreamServerRpc().addRaftPeers(others);
+  }
+
   private CompletableFuture<RaftServerImpl> newRaftServerImpl(RaftGroup group) {
     return CompletableFuture.supplyAsync(() -> {
       try {
-        serverRpc.addPeers(group.getPeers());
+        addRaftPeers(group.getPeers());
         return new RaftServerImpl(group, stateMachineRegistry.apply(group.getGroupId()), this);
       } catch(IOException e) {
         throw new CompletionException(getId() + ": Failed to initialize server for " + group, e);
@@ -234,6 +287,21 @@ public class RaftServerProxy implements RaftServer {
   }
 
   @Override
+  public RaftPeer getPeer() {
+    return peerSupplier.get();
+  }
+
+  private RaftPeer buildRaftPeer() {
+    return RaftPeer.newBuilder()
+        .setId(getId())
+        .setAddress(getServerRpc().getInetSocketAddress())
+        .setDataStreamAddress(getDataStreamServerRpc().getInetSocketAddress())
+        .setClientAddress(getServerRpc().getClientServerAddress())
+        .setAdminAddress(getServerRpc().getAdminServerAddress())
+        .build();
+  }
+
+  @Override
   public List<RaftGroupId> getGroupIds() {
     return impls.getGroupIds();
   }
@@ -241,11 +309,6 @@ public class RaftServerProxy implements RaftServer {
   @Override
   public Iterable<RaftGroup> getGroups() throws IOException {
     return getImpls().stream().map(RaftServerImpl::getGroup).collect(Collectors.toList());
-  }
-
-  @Override
-  public RpcType getRpcType() {
-    return getFactory().getRpcType();
   }
 
   @Override
@@ -258,15 +321,17 @@ public class RaftServerProxy implements RaftServer {
     return properties;
   }
 
+  @Override
   public RaftServerRpc getServerRpc() {
     return serverRpc;
   }
 
-  public boolean containsGroup(RaftGroupId groupId) {
-    return impls.containsGroup(groupId);
+  @Override
+  public DataStreamServerRpc getDataStreamServerRpc() {
+    return dataStreamServerRpc;
   }
 
-  public CompletableFuture<RaftServerImpl> addGroup(RaftGroup group) {
+  private CompletableFuture<RaftServerImpl> addGroup(RaftGroup group) {
     return impls.addNew(group);
   }
 
@@ -278,7 +343,7 @@ public class RaftServerProxy implements RaftServer {
     return getImpl(ProtoUtils.toRaftGroupId(proto.getRaftGroupId()));
   }
 
-  public RaftServerImpl getImpl(RaftGroupId groupId) throws IOException {
+  private RaftServerImpl getImpl(RaftGroupId groupId) throws IOException {
     Objects.requireNonNull(groupId, "groupId == null");
     return IOUtils.getFromFuture(getImplFuture(groupId), this::getId);
   }
@@ -289,6 +354,11 @@ public class RaftServerProxy implements RaftServer {
       list.add(IOUtils.getFromFuture(f, this::getId));
     }
     return list;
+  }
+
+  @Override
+  public Division getDivision(RaftGroupId groupId) throws IOException {
+    return getImpl(groupId);
   }
 
   @Override
@@ -303,7 +373,9 @@ public class RaftServerProxy implements RaftServer {
     lifeCycle.startAndTransition(() -> {
       LOG.info("{}: start RPC server", getId());
       getServerRpc().start();
+      getDataStreamServerRpc().start();
     }, IOException.class);
+    pauseMonitor.start();
   }
 
   @Override
@@ -324,7 +396,14 @@ public class RaftServerProxy implements RaftServer {
       } catch(IOException ignored) {
         LOG.warn(getId() + ": Failed to close " + getRpcType() + " server", ignored);
       }
+
+      try {
+        getDataStreamServerRpc().close();
+      } catch (IOException ignored) {
+        LOG.warn(getId() + ": Failed to close " + SupportedDataStreamType.NETTY + " server", ignored);
+      }
     });
+    pauseMonitor.stop();
   }
 
   private <REPLY> CompletableFuture<REPLY> submitRequest(RaftGroupId groupId,
@@ -351,9 +430,18 @@ public class RaftServerProxy implements RaftServer {
   }
 
   @Override
+  public RaftClientReply transferLeadership(TransferLeadershipRequest request)
+      throws IOException {
+    return getImpl(request.getRaftGroupId()).transferLeadership(request);
+  }
+
+  @Override
   public RaftClientReply groupManagement(GroupManagementRequest request) throws IOException {
     return RaftServerImpl.waitForReply(getId(), request, groupManagementAsync(request),
-        e -> new RaftClientReply(request, e, null));
+        e -> RaftClientReply.newBuilder()
+            .setRequest(request)
+            .setException(e)
+            .build());
   }
 
   @Override
@@ -369,7 +457,8 @@ public class RaftServerProxy implements RaftServer {
     }
     final GroupManagementRequest.Remove remove = request.getRemove();
     if (remove != null) {
-      return groupRemoveAsync(request, remove.getGroupId(), remove.isDeleteDirectory());
+      return groupRemoveAsync(request, remove.getGroupId(),
+          remove.isDeleteDirectory(), remove.isRenameDirectory());
     }
     return JavaUtils.completeExceptionally(new UnsupportedOperationException(
         getId() + ": Request not supported " + request));
@@ -385,7 +474,7 @@ public class RaftServerProxy implements RaftServer {
           LOG.debug("{}: newImpl = {}", getId(), newImpl);
           final boolean started = newImpl.start();
           Preconditions.assertTrue(started, () -> getId()+ ": failed to start a new impl: " + newImpl);
-          return new RaftClientReply(request, newImpl.getCommitInfos());
+          return newImpl.newSuccessReply(request);
         }, implExecutor)
         .whenComplete((raftClientReply, throwable) -> {
           if (throwable != null) {
@@ -402,7 +491,8 @@ public class RaftServerProxy implements RaftServer {
   }
 
   private CompletableFuture<RaftClientReply> groupRemoveAsync(
-      RaftClientRequest request, RaftGroupId groupId, boolean deleteDirectory) {
+      RaftClientRequest request, RaftGroupId groupId, boolean deleteDirectory,
+      boolean renameDirectory) {
     if (!request.getRaftGroupId().equals(groupId)) {
       return JavaUtils.completeExceptionally(new GroupMismatchException(
           getId() + ": Request group id (" + request.getRaftGroupId() + ") does not match the given group id " +
@@ -414,10 +504,8 @@ public class RaftServerProxy implements RaftServer {
           getId() + ": Group " + groupId + " not found."));
     }
     return f.thenApply(impl -> {
-      final Collection<CommitInfoProto> commitInfos = impl.getCommitInfos();
-      impl.shutdown(deleteDirectory);
-      impl.getStateMachine().notifyGroupRemove();
-      return new RaftClientReply(request, commitInfos);
+      impl.groupRemove(deleteDirectory, renameDirectory);
+      return impl.newSuccessReply(request);
     });
   }
 
@@ -451,8 +539,18 @@ public class RaftServerProxy implements RaftServer {
   }
 
   @Override
+  public CompletableFuture<RaftClientReply> transferLeadershipAsync(TransferLeadershipRequest request) {
+    return submitRequest(request.getRaftGroupId(), impl -> impl.transferLeadershipAsync(request));
+  }
+
+  @Override
   public RequestVoteReplyProto requestVote(RequestVoteRequestProto request) throws IOException {
     return getImpl(request.getServerRequest()).requestVote(request);
+  }
+
+  @Override
+  public StartLeaderElectionReplyProto startLeaderElection(StartLeaderElectionRequestProto request) throws IOException {
+    return getImpl(request.getServerRequest()).startLeaderElection(request);
   }
 
   @Override

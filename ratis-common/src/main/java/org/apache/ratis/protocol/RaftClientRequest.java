@@ -29,31 +29,41 @@ import static org.apache.ratis.proto.RaftProtos.RaftClientRequestProto.TypeCase.
  * Request from client to server
  */
 public class RaftClientRequest extends RaftClientMessage {
+  private static final Type DATA_STREAM_DEFAULT = new Type(DataStreamRequestTypeProto.getDefaultInstance());
+  private static final Type FORWARD_DEFAULT = new Type(ForwardRequestTypeProto.getDefaultInstance());
   private static final Type WRITE_DEFAULT = new Type(WriteRequestTypeProto.getDefaultInstance());
   private static final Type WATCH_DEFAULT = new Type(
       WatchRequestTypeProto.newBuilder().setIndex(0L).setReplication(ReplicationLevel.MAJORITY).build());
 
-  private static final Type DEFAULT_READ = new Type(ReadRequestTypeProto.getDefaultInstance());
-  private static final Type DEFAULT_STALE_READ = new Type(StaleReadRequestTypeProto.getDefaultInstance());
+  private static final Type READ_DEFAULT = new Type(ReadRequestTypeProto.getDefaultInstance());
+  private static final Type STALE_READ_DEFAULT = new Type(StaleReadRequestTypeProto.getDefaultInstance());
 
   public static Type writeRequestType() {
     return WRITE_DEFAULT;
   }
 
-  public static Type streamRequestType(long streamId, long messageId, boolean close) {
-    return new Type(StreamRequestTypeProto.newBuilder()
+  public static Type dataStreamRequestType() {
+    return DATA_STREAM_DEFAULT;
+  }
+
+  public static Type forwardRequestType() {
+    return FORWARD_DEFAULT;
+  }
+
+  public static Type messageStreamRequestType(long streamId, long messageId, boolean endOfRequest) {
+    return new Type(MessageStreamRequestTypeProto.newBuilder()
         .setStreamId(streamId)
         .setMessageId(messageId)
-        .setClose(close)
+        .setEndOfRequest(endOfRequest)
         .build());
   }
 
   public static Type readRequestType() {
-    return DEFAULT_READ;
+    return READ_DEFAULT;
   }
 
   public static Type staleReadRequestType(long minIndex) {
-    return minIndex == 0L? DEFAULT_STALE_READ
+    return minIndex == 0L? STALE_READ_DEFAULT
         : new Type(StaleReadRequestTypeProto.newBuilder().setMinIndex(minIndex).build());
   }
 
@@ -70,21 +80,29 @@ public class RaftClientRequest extends RaftClientMessage {
       return WRITE_DEFAULT;
     }
 
+    public static Type valueOf(DataStreamRequestTypeProto dataStream) {
+      return DATA_STREAM_DEFAULT;
+    }
+
+    public static Type valueOf(ForwardRequestTypeProto forward) {
+      return FORWARD_DEFAULT;
+    }
+
     public static Type valueOf(ReadRequestTypeProto read) {
-      return DEFAULT_READ;
+      return READ_DEFAULT;
     }
 
     public static Type valueOf(StaleReadRequestTypeProto staleRead) {
-      return staleRead.getMinIndex() == 0? DEFAULT_STALE_READ
-          : new Type(staleRead);
+      return staleRead.getMinIndex() == 0? STALE_READ_DEFAULT: new Type(staleRead);
     }
 
     public static Type valueOf(WatchRequestTypeProto watch) {
       return watchRequestType(watch.getIndex(), watch.getReplication());
     }
 
-    public static Type valueOf(StreamRequestTypeProto stream) {
-      return streamRequestType(stream.getStreamId(), stream.getMessageId(), stream.getClose());
+    public static Type valueOf(MessageStreamRequestTypeProto messageStream) {
+      return messageStreamRequestType(
+          messageStream.getStreamId(), messageStream.getMessageId(), messageStream.getEndOfRequest());
     }
 
     /**
@@ -104,8 +122,16 @@ public class RaftClientRequest extends RaftClientMessage {
       this(WRITE, write);
     }
 
-    private Type(StreamRequestTypeProto stream) {
-      this(STREAM, stream);
+    private Type(DataStreamRequestTypeProto dataStream) {
+      this(DATASTREAM, dataStream);
+    }
+
+    private Type(ForwardRequestTypeProto forward) {
+      this(FORWARD, forward);
+    }
+
+    private Type(MessageStreamRequestTypeProto messageStream) {
+      this(MESSAGESTREAM, messageStream);
     }
 
     private Type(ReadRequestTypeProto read) {
@@ -133,9 +159,19 @@ public class RaftClientRequest extends RaftClientMessage {
       return (WriteRequestTypeProto)proto;
     }
 
-    public StreamRequestTypeProto getStream() {
-      Preconditions.assertTrue(is(STREAM), () -> "proto = " + proto);
-      return (StreamRequestTypeProto)proto;
+    public DataStreamRequestTypeProto getDataStream() {
+      Preconditions.assertTrue(is(DATASTREAM));
+      return (DataStreamRequestTypeProto)proto;
+    }
+
+    public ForwardRequestTypeProto getForward() {
+      Preconditions.assertTrue(is(FORWARD));
+      return (ForwardRequestTypeProto)proto;
+    }
+
+    public MessageStreamRequestTypeProto getMessageStream() {
+      Preconditions.assertTrue(is(MESSAGESTREAM), () -> "proto = " + proto);
+      return (MessageStreamRequestTypeProto)proto;
     }
 
     public ReadRequestTypeProto getRead() {
@@ -161,8 +197,8 @@ public class RaftClientRequest extends RaftClientMessage {
       return "Watch" + toString(w.getReplication()) + "(" + w.getIndex() + ")";
     }
 
-    public static String toString(StreamRequestTypeProto s) {
-      return "Stream" + s.getStreamId() + "-" + s.getMessageId() + (s.getClose()? "-close": "");
+    public static String toString(MessageStreamRequestTypeProto s) {
+      return "MessageStream" + s.getStreamId() + "-" + s.getMessageId() + (s.getEndOfRequest()? "-eor": "");
     }
 
     @Override
@@ -170,8 +206,12 @@ public class RaftClientRequest extends RaftClientMessage {
       switch (typeCase) {
         case WRITE:
           return "RW";
-        case STREAM:
-          return toString(getStream());
+        case DATASTREAM:
+          return "DataStream";
+        case FORWARD:
+          return "Forward";
+        case MESSAGESTREAM:
+          return toString(getMessageStream());
         case READ:
           return "RO";
         case STALEREAD:
@@ -184,30 +224,131 @@ public class RaftClientRequest extends RaftClientMessage {
     }
   }
 
-  /** Convert the given request to a write request with the given message. */
-  public static RaftClientRequest toWriteRequest(RaftClientRequest r, Message message) {
-    return new RaftClientRequest(r.getClientId(), r.getServerId(), r.getRaftGroupId(),
-        r.getCallId(), message, RaftClientRequest.writeRequestType(), r.getSlidingWindowEntry());
+  /**
+   * To build {@link RaftClientRequest}
+   */
+  public static class Builder {
+    private ClientId clientId;
+    private RaftPeerId serverId;
+    private RaftGroupId groupId;
+    private long callId;
+    private boolean toLeader;
+
+    private Message message;
+    private Type type;
+    private SlidingWindowEntry slidingWindowEntry;
+    private RoutingTable routingTable;
+    private long timeoutMs;
+
+    public RaftClientRequest build() {
+      return new RaftClientRequest(
+          clientId, serverId, groupId, callId, toLeader, message, type, slidingWindowEntry, routingTable, timeoutMs);
+    }
+
+    public Builder setClientId(ClientId clientId) {
+      this.clientId = clientId;
+      return this;
+    }
+
+    public Builder setLeaderId(RaftPeerId leaderId) {
+      this.serverId = leaderId;
+      this.toLeader = true;
+      return this;
+    }
+
+    public Builder setServerId(RaftPeerId serverId) {
+      this.serverId = serverId;
+      this.toLeader = false;
+      return this;
+    }
+
+    public Builder setGroupId(RaftGroupId groupId) {
+      this.groupId = groupId;
+      return this;
+    }
+
+    public Builder setCallId(long callId) {
+      this.callId = callId;
+      return this;
+    }
+
+    public Builder setMessage(Message message) {
+      this.message = message;
+      return this;
+    }
+
+    public Builder setType(Type type) {
+      this.type = type;
+      return this;
+    }
+
+    public Builder setSlidingWindowEntry(SlidingWindowEntry slidingWindowEntry) {
+      this.slidingWindowEntry = slidingWindowEntry;
+      return this;
+    }
+
+    public Builder setRoutingTable(RoutingTable routingTable) {
+      this.routingTable = routingTable;
+      return this;
+    }
+
+    public Builder setTimeoutMs(long timeoutMs) {
+      this.timeoutMs = timeoutMs;
+      return this;
+    }
   }
 
-  private final long callId;
+  public static Builder newBuilder() {
+    return new Builder();
+  }
+
+  /** Convert the given request to a write request with the given message. */
+  public static RaftClientRequest toWriteRequest(RaftClientRequest r, Message message) {
+    return RaftClientRequest.newBuilder()
+        .setClientId(r.getClientId())
+        .setServerId(r.getServerId())
+        .setGroupId(r.getRaftGroupId())
+        .setCallId(r.getCallId())
+        .setMessage(message)
+        .setType(RaftClientRequest.writeRequestType())
+        .setSlidingWindowEntry(r.getSlidingWindowEntry())
+        .build();
+  }
+
   private final Message message;
   private final Type type;
 
   private final SlidingWindowEntry slidingWindowEntry;
 
-  public RaftClientRequest(ClientId clientId, RaftPeerId serverId, RaftGroupId groupId, long callId, Type type) {
-    this(clientId, serverId, groupId, callId, null, type, null);
+  private final RoutingTable routingTable;
+
+  private final long timeoutMs;
+
+  private final boolean toLeader;
+
+  protected RaftClientRequest(ClientId clientId, RaftPeerId serverId, RaftGroupId groupId, long callId,
+      boolean toLeader, Type type) {
+    this(clientId, serverId, groupId, callId, toLeader, null, type, null, null, 0);
   }
 
-  public RaftClientRequest(
+  protected RaftClientRequest(ClientId clientId, RaftPeerId serverId, RaftGroupId groupId, long callId, Type type,
+      long timeoutMs) {
+    this(clientId, serverId, groupId, callId, true, null, type, null, null, timeoutMs);
+  }
+
+  @SuppressWarnings("parameternumber")
+  private RaftClientRequest(
       ClientId clientId, RaftPeerId serverId, RaftGroupId groupId,
-      long callId, Message message, Type type, SlidingWindowEntry slidingWindowEntry) {
-    super(clientId, serverId, groupId);
-    this.callId = callId;
+      long callId, boolean toLeader, Message message, Type type, SlidingWindowEntry slidingWindowEntry,
+      RoutingTable routingTable, long timeoutMs) {
+    super(clientId, serverId, groupId, callId);
+    this.toLeader = toLeader;
+
     this.message = message;
     this.type = type;
     this.slidingWindowEntry = slidingWindowEntry != null? slidingWindowEntry: SlidingWindowEntry.getDefaultInstance();
+    this.routingTable = routingTable;
+    this.timeoutMs = timeoutMs;
   }
 
   @Override
@@ -215,8 +356,8 @@ public class RaftClientRequest extends RaftClientMessage {
     return true;
   }
 
-  public long getCallId() {
-    return callId;
+  public boolean isToLeader() {
+    return toLeader;
   }
 
   public SlidingWindowEntry getSlidingWindowEntry() {
@@ -235,9 +376,17 @@ public class RaftClientRequest extends RaftClientMessage {
     return getType().is(typeCase);
   }
 
+  public RoutingTable getRoutingTable() {
+    return routingTable;
+  }
+
+  public long getTimeoutMs() {
+    return timeoutMs;
+  }
+
   @Override
   public String toString() {
-    return super.toString() + ", cid=" + callId + ", seq=" + ProtoUtils.toString(slidingWindowEntry) + ", "
+    return super.toString() + ", seq=" + ProtoUtils.toString(slidingWindowEntry) + ", "
         + type + ", " + getMessage();
   }
 }

@@ -20,12 +20,13 @@ package org.apache.ratis.client.impl;
 import org.apache.ratis.client.retry.ClientRetryEvent;
 import org.apache.ratis.client.impl.RaftClientImpl.PendingClientRequest;
 import org.apache.ratis.protocol.ClientId;
-import org.apache.ratis.protocol.GroupMismatchException;
-import org.apache.ratis.protocol.NotLeaderException;
+import org.apache.ratis.protocol.exceptions.GroupMismatchException;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftClientRequest;
-import org.apache.ratis.protocol.RaftException;
+import org.apache.ratis.protocol.exceptions.RaftException;
 import org.apache.ratis.retry.RetryPolicy;
+import org.apache.ratis.rpc.CallId;
 import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.TimeDuration;
 import org.slf4j.Logger;
@@ -54,7 +55,7 @@ public interface UnorderedAsync {
   }
 
   static CompletableFuture<RaftClientReply> send(RaftClientRequest.Type type, RaftClientImpl client) {
-    final long callId = RaftClientImpl.nextCallId();
+    final long callId = CallId.getAndIncrement();
     final PendingClientRequest pending = new PendingUnorderedRequest(
         () -> client.newRaftClientRequest(null, callId, null, type, null));
     sendRequestWithRetry(pending, client);
@@ -77,8 +78,9 @@ public interface UnorderedAsync {
       try {
         LOG.debug("{}: attempt #{} receive~ {}", clientId, attemptCount, reply);
         final RaftException replyException = reply != null? reply.getException(): null;
-        reply = client.handleLeaderException(request, reply, null);
+        reply = client.handleLeaderException(request, reply);
         if (reply != null) {
+          client.handleReply(request, reply);
           f.complete(reply);
           return;
         }
@@ -122,9 +124,9 @@ public interface UnorderedAsync {
         LOG.debug("schedule retry for attempt #{}, policy={}, request={}", attemptCount, retryPolicy, request);
         client.getScheduler().onTimeout(sleepTime,
             () -> sendRequestWithRetry(pending, client), LOG, () -> clientId + ": Failed~ to retry " + request);
-      } catch (Throwable t) {
-        LOG.error(clientId + ": Failed " + request, t);
-        f.completeExceptionally(t);
+      } catch (Exception ex) {
+        LOG.error(clientId + ": Failed " + request, ex);
+        f.completeExceptionally(ex);
       }
     });
   }

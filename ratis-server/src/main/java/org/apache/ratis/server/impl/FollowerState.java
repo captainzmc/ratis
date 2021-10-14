@@ -17,12 +17,15 @@
  */
 package org.apache.ratis.server.impl;
 
+import org.apache.ratis.server.leader.LeaderState;
 import org.apache.ratis.util.Daemon;
 import org.apache.ratis.util.JavaUtils;
+import org.apache.ratis.util.TimeDuration;
 import org.apache.ratis.util.Timestamp;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.ToIntFunction;
 
@@ -52,15 +55,19 @@ class FollowerState extends Daemon {
   static final Logger LOG = LoggerFactory.getLogger(FollowerState.class);
 
   private final String name;
+  private final Object reason;
   private final RaftServerImpl server;
 
-  private volatile Timestamp lastRpcTime = Timestamp.currentTime();
+  private final Timestamp creationTime = Timestamp.currentTime();
+  private volatile Timestamp lastRpcTime = creationTime;
   private volatile boolean isRunning = true;
   private final AtomicInteger outstandingOp = new AtomicInteger();
 
-  FollowerState(RaftServerImpl server) {
-    this.name = server.getMemberId() + "-" + getClass().getSimpleName();
+  FollowerState(RaftServerImpl server, Object reason) {
+    this.name = server.getMemberId() + "-" + JavaUtils.getClassSimpleName(getClass());
+    this.setName(this.name);
     this.server = server;
+    this.reason = reason;
   }
 
   void updateLastRpcTime(UpdateType type) {
@@ -80,45 +87,65 @@ class FollowerState extends Daemon {
     return outstandingOp.get();
   }
 
-  boolean shouldWithholdVotes() {
-    return lastRpcTime.elapsedTimeMs() < server.getMinTimeoutMs();
+  boolean isCurrentLeaderValid() {
+    return lastRpcTime.elapsedTime().compareTo(server.properties().minRpcTimeout()) < 0;
   }
 
   void stopRunning() {
     this.isRunning = false;
   }
 
+  boolean lostMajorityHeartbeatsRecently() {
+    if (reason != LeaderState.StepDownReason.LOST_MAJORITY_HEARTBEATS) {
+      return false;
+    }
+    final TimeDuration elapsed = creationTime.elapsedTime();
+    final TimeDuration waitTime = server.getLeaderStepDownWaitTime();
+    if (elapsed.compareTo(waitTime) >= 0) {
+      return false;
+    }
+    LOG.info("{}: Skipping leader election since it stepped down recently (elapsed = {} < waitTime = {})",
+        this, elapsed.to(TimeUnit.MILLISECONDS), waitTime);
+    return true;
+  }
+
   @Override
   public  void run() {
-    long sleepDeviationThresholdMs = server.getSleepDeviationThresholdMs();
-    while (isRunning && server.isFollower()) {
-      final long electionTimeout = server.getRandomTimeoutMs();
+    final TimeDuration sleepDeviationThreshold = server.getSleepDeviationThreshold();
+    while (isRunning && server.getInfo().isFollower()) {
+      final TimeDuration electionTimeout = server.getRandomElectionTimeout();
       try {
-        if (!JavaUtils.sleep(electionTimeout, sleepDeviationThresholdMs)) {
+        final TimeDuration extraSleep = electionTimeout.sleep();
+        if (extraSleep.compareTo(sleepDeviationThreshold) > 0) {
+          LOG.warn("Unexpected long sleep: sleep {} but took extra {} (> threshold = {})",
+              electionTimeout, extraSleep, sleepDeviationThreshold);
           continue;
         }
 
-        final boolean isFollower = server.isFollower();
+        final boolean isFollower = server.getInfo().isFollower();
         if (!isRunning || !isFollower) {
           LOG.info("{}: Stopping now (isRunning? {}, isFollower? {})", this, isRunning, isFollower);
           break;
         }
         synchronized (server) {
-          if (outstandingOp.get() == 0 && lastRpcTime.elapsedTimeMs() >= electionTimeout) {
-            LOG.info("{}: change to CANDIDATE, lastRpcTime:{}ms, electionTimeout:{}ms",
-                this, lastRpcTime.elapsedTimeMs(), electionTimeout);
+          if (outstandingOp.get() == 0
+              && lastRpcTime.elapsedTime().compareTo(electionTimeout) >= 0
+              && !lostMajorityHeartbeatsRecently()) {
+            LOG.info("{}: change to CANDIDATE, lastRpcElapsedTime:{}, electionTimeout:{}",
+                this, lastRpcTime.elapsedTime(), electionTimeout);
             server.getLeaderElectionMetrics().onLeaderElectionTimeout(); // Update timeout metric counters.
             // election timeout, should become a candidate
-            server.changeToCandidate();
+            server.changeToCandidate(false);
             break;
           }
         }
       } catch (InterruptedException e) {
-        LOG.info(this + " was interrupted: " + e);
+        LOG.info("{} was interrupted: {}", this, e);
         LOG.trace("TRACE", e);
+        Thread.currentThread().interrupt();
         return;
       } catch (Exception e) {
-        LOG.warn(this + " caught an exception", e);
+        LOG.warn("{} caught an exception", this, e);
       }
     }
   }

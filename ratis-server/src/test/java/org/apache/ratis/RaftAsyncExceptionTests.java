@@ -22,11 +22,12 @@ import org.apache.ratis.RaftTestUtil.SimpleMessage;
 import org.apache.ratis.client.RaftClient;
 import org.apache.ratis.client.RaftClientConfigKeys;
 import org.apache.ratis.client.impl.OrderedAsync;
-import org.apache.ratis.protocol.AlreadyClosedException;
-import org.apache.ratis.protocol.GroupMismatchException;
+import org.apache.ratis.protocol.exceptions.AlreadyClosedException;
+import org.apache.ratis.protocol.exceptions.GroupMismatchException;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftGroup;
 import org.apache.ratis.protocol.RaftGroupId;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.statemachine.SimpleStateMachine4Testing;
 import org.apache.ratis.statemachine.StateMachine;
 import org.apache.ratis.util.Log4jUtils;
@@ -38,6 +39,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.stream.StreamSupport;
 
 public abstract class RaftAsyncExceptionTests<CLUSTER extends MiniRaftCluster>
     extends BaseTest
@@ -59,7 +61,7 @@ public abstract class RaftAsyncExceptionTests<CLUSTER extends MiniRaftCluster>
   private void runTestGroupMismatchException(CLUSTER cluster) throws Exception {
     // send a message to make sure the cluster is working
     try(RaftClient client = cluster.createClient()) {
-      final RaftClientReply reply = client.sendAsync(new SimpleMessage("first")).get();
+      final RaftClientReply reply = client.async().send(new SimpleMessage("first")).get();
       Assert.assertTrue(reply.isSuccess());
     }
 
@@ -74,7 +76,7 @@ public abstract class RaftAsyncExceptionTests<CLUSTER extends MiniRaftCluster>
       // send a few messages
       final List<CompletableFuture<RaftClientReply>> futures = new ArrayList<>();
       for(SimpleMessage m : messages) {
-        futures.add(client.sendAsync(m));
+        futures.add(client.async().send(m));
       }
       Assert.assertEquals(messages.length, futures.size());
 
@@ -99,20 +101,20 @@ public abstract class RaftAsyncExceptionTests<CLUSTER extends MiniRaftCluster>
   private void runTestTimeoutException(CLUSTER cluster) throws Exception {
     // send a message to make sure the cluster is working
     try(RaftClient client = cluster.createClient()) {
-      final RaftClientReply reply = client.send(new SimpleMessage("m0"));
+      final RaftClientReply reply = client.io().send(new SimpleMessage("m0"));
       Assert.assertTrue(reply.isSuccess());
 
       RaftClientConfigKeys.Rpc.setRequestTimeout(properties.get(), ONE_SECOND);
       // Block StartTransaction
-      cluster.getServers().stream()
-          .map(cluster::getRaftServerImpl)
+      StreamSupport.stream(cluster.getServers().spliterator(), false)
+          .map(cluster::getDivision)
           .map(SimpleStateMachine4Testing::get)
           .forEach(SimpleStateMachine4Testing::blockStartTransaction);
-      final CompletableFuture<RaftClientReply> replyFuture = client.sendAsync(new SimpleMessage("m1"));
+      final CompletableFuture<RaftClientReply> replyFuture = client.async().send(new SimpleMessage("m1"));
       FIVE_SECONDS.sleep();
       // Unblock StartTransaction
-      cluster.getServers().stream()
-          .map(cluster::getRaftServerImpl)
+      StreamSupport.stream(cluster.getServers().spliterator(), false)
+          .map(cluster::getDivision)
           .map(SimpleStateMachine4Testing::get)
           .forEach(SimpleStateMachine4Testing::unblockStartTransaction);
       // The request should succeed after start transaction is unblocked

@@ -98,7 +98,7 @@ public class LogStreamImpl implements LogStream {
   }
 
   @Override public State getState() throws IOException {
-    RaftClientReply reply = raftClient.sendReadOnly(
+    RaftClientReply reply = raftClient.io().sendReadOnly(
         Message.valueOf(LogServiceProtoUtil.toGetStateRequestProto(name).toByteString()));
     LogServiceProtos.GetStateReplyProto proto =
         LogServiceProtos.GetStateReplyProto.parseFrom(reply.getMessage().getContent());
@@ -108,8 +108,12 @@ public class LogStreamImpl implements LogStream {
   @Override
   public long getSize() throws IOException{
     RaftClientReply reply = raftClient
-        .sendReadOnly(Message.valueOf(LogServiceProtoUtil
+        .io().sendReadOnly(Message.valueOf(LogServiceProtoUtil
             .toGetSizeRequestProto(name).toByteString()));
+    if (reply.getException() != null) {
+      throw new IOException(reply.getException());
+    }
+
     GetLogSizeReplyProto proto =
         GetLogSizeReplyProto.parseFrom(reply.getMessage().getContent());
     if (proto.hasException()) {
@@ -122,8 +126,12 @@ public class LogStreamImpl implements LogStream {
   @Override
   public long getLength() throws IOException {
     RaftClientReply reply = raftClient
-        .sendReadOnly(Message.valueOf(LogServiceProtoUtil
+        .io().sendReadOnly(Message.valueOf(LogServiceProtoUtil
             .toGetLengthRequestProto(name).toByteString()));
+    if (reply.getException() != null) {
+      throw new IOException(reply.getException());
+    }
+
     GetLogLengthReplyProto proto =
         GetLogLengthReplyProto.parseFrom(reply.getMessage().getContent());
     if (proto.hasException()) {
@@ -147,8 +155,12 @@ public class LogStreamImpl implements LogStream {
   public long getLastRecordId() throws IOException {
     try {
       RaftClientReply reply = raftClient
-          .sendReadOnly(Message.valueOf(LogServiceProtoUtil
+          .io().sendReadOnly(Message.valueOf(LogServiceProtoUtil
               .toGetLastCommittedIndexRequestProto(name).toByteString()));
+      if (reply.getException() != null) {
+        throw new IOException(reply.getException());
+      }
+
       GetLogLastCommittedIndexReplyProto proto =
           GetLogLastCommittedIndexReplyProto.parseFrom(reply.getMessage().getContent());
       if (proto.hasException()) {
@@ -165,8 +177,12 @@ public class LogStreamImpl implements LogStream {
   public long getStartRecordId() throws IOException {
     try {
       RaftClientReply reply = raftClient
-          .sendReadOnly(Message.valueOf(LogServiceProtoUtil
+          .io().sendReadOnly(Message.valueOf(LogServiceProtoUtil
               .toGetStartIndexProto(name).toByteString()));
+      if (reply.getException() != null) {
+        throw new IOException(reply.getException());
+      }
+
       GetLogStartIndexReplyProto proto =
           GetLogStartIndexReplyProto.parseFrom(reply.getMessage().getContent());
       if (proto.hasException()) {
@@ -192,6 +208,7 @@ public class LogStreamImpl implements LogStream {
   @Override
   public void close() throws Exception {
     // TODO Auto-generated method stub
+    raftClient.close();
     state = State.CLOSED;
   }
 

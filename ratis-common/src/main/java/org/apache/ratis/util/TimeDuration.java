@@ -205,6 +205,11 @@ public final class TimeDuration implements Comparable<TimeDuration> {
     return valueOf(this.toLong(minUnit) + that.toLong(minUnit), minUnit);
   }
 
+  /** @return (this + (thatDuration, thatUnit)) in the minimum unit among them. */
+  public TimeDuration add(long thatDuration, TimeUnit thatUnit) {
+    return add(TimeDuration.valueOf(thatDuration, thatUnit));
+  }
+
   /** @return (this - that) in the minimum unit among them. */
   public TimeDuration subtract(TimeDuration that) {
     Objects.requireNonNull(that, "that == null");
@@ -259,7 +264,7 @@ public final class TimeDuration implements Comparable<TimeDuration> {
   public long roundUpNanos(long nanos) {
     if (duration <= 0) {
       throw new ArithmeticException(
-          "Rounding up to a non-positive " + getClass().getSimpleName() + " (=" + this + ")");
+          "Rounding up to a non-positive " + JavaUtils.getClassSimpleName(getClass()) + " (=" + this + ")");
     }
 
     final long divisor = toLong(TimeUnit.NANOSECONDS);
@@ -299,26 +304,35 @@ public final class TimeDuration implements Comparable<TimeDuration> {
     return duration <= 0;
   }
 
-  /** Performs a {@link TimeUnit#sleep(long)} using this {@link TimeDuration}. */
-  public void sleep() throws InterruptedException {
-    sleep(null);
+  /** The same as sleep(null). */
+  public TimeDuration sleep() throws InterruptedException {
+    return sleep(null);
   }
 
-  public void sleep(Consumer<Object> log) throws InterruptedException {
+  /**
+   * Performs a {@link TimeUnit#sleep(long)} using this {@link TimeDuration}.
+   *
+   * @param log If not null, use it to print log messages.
+   * @return the difference of the actual sleep time duration and this {@link TimeDuration}.
+   */
+  public TimeDuration sleep(Consumer<Object> log) throws InterruptedException {
     if (log != null) {
       log.accept(StringUtils.stringSupplierAsObject(() -> "Start sleeping " + this));
     }
+    final Timestamp start = Timestamp.currentTime();
     try {
       unit.sleep(duration);
       if (log != null) {
         log.accept(StringUtils.stringSupplierAsObject(() -> "Completed sleeping " + this));
       }
-    } catch(InterruptedException ie) {
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
       if (log != null) {
         log.accept(StringUtils.stringSupplierAsObject(() -> "Interrupted sleeping " + this));
       }
       throw ie;
     }
+    return start.elapsedTime().subtract(this);
   }
 
   @Override

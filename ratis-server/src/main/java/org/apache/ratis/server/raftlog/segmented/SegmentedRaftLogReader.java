@@ -18,9 +18,9 @@
 package org.apache.ratis.server.raftlog.segmented;
 
 import org.apache.ratis.io.CorruptedFileException;
-import org.apache.ratis.protocol.ChecksumException;
-import org.apache.ratis.server.impl.RaftServerConstants;
-import org.apache.ratis.server.metrics.RaftLogMetrics;
+import org.apache.ratis.protocol.exceptions.ChecksumException;
+import org.apache.ratis.server.metrics.SegmentedRaftLogMetrics;
+import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.thirdparty.com.google.protobuf.CodedInputStream;
 import org.apache.ratis.thirdparty.com.google.protobuf.CodedOutputStream;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
@@ -32,6 +32,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
+import java.util.Optional;
 import java.util.zip.Checksum;
 
 import com.codahale.metrics.Timer;
@@ -139,9 +140,9 @@ class SegmentedRaftLogReader implements Closeable {
   private final DataInputStream in;
   private byte[] temp = new byte[4096];
   private final Checksum checksum;
-  private final RaftLogMetrics raftLogMetrics;
+  private final SegmentedRaftLogMetrics raftLogMetrics;
 
-  SegmentedRaftLogReader(File file, RaftLogMetrics raftLogMetrics) throws FileNotFoundException {
+  SegmentedRaftLogReader(File file, SegmentedRaftLogMetrics raftLogMetrics) throws FileNotFoundException {
     this.file = file;
     this.limiter = new LimitedInputStream(
         new BufferedInputStream(new FileInputStream(file)));
@@ -212,7 +213,7 @@ class SegmentedRaftLogReader implements Closeable {
       in.reset();
 
       throw e;
-    } catch (Throwable e) {
+    } catch (Exception e) {
       // raft log requires no gap between any two entries. thus if an entry is
       // broken, throw the exception instead of skipping broken entries
       in.reset();
@@ -229,8 +230,7 @@ class SegmentedRaftLogReader implements Closeable {
    * @return the index of the log entry
    */
   long scanEntry() throws IOException {
-    LogEntryProto entry = decodeEntry();
-    return entry != null ? entry.getIndex() : RaftServerConstants.INVALID_LOG_INDEX;
+    return Optional.ofNullable(decodeEntry()).map(LogEntryProto::getIndex).orElse(RaftLog.INVALID_LOG_INDEX);
   }
 
   void verifyTerminator() throws IOException {

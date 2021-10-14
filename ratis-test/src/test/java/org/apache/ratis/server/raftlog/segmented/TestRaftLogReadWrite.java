@@ -20,12 +20,12 @@ package org.apache.ratis.server.raftlog.segmented;
 import org.apache.ratis.BaseTest;
 import org.apache.ratis.RaftTestUtil.SimpleOperation;
 import org.apache.ratis.conf.RaftProperties;
-import org.apache.ratis.protocol.ChecksumException;
+import org.apache.ratis.protocol.exceptions.ChecksumException;
 import org.apache.ratis.server.RaftServerConfigKeys;
-import org.apache.ratis.server.impl.RaftServerConstants;
-import org.apache.ratis.server.impl.RaftServerConstants.StartupOption;
-import org.apache.ratis.server.impl.ServerProtoUtils;
+import org.apache.ratis.server.raftlog.LogProtoUtils;
+import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.server.storage.RaftStorage;
+import org.apache.ratis.server.storage.RaftStorageTestUtils;
 import org.apache.ratis.thirdparty.com.google.protobuf.CodedOutputStream;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
 import org.apache.ratis.util.FileUtils;
@@ -53,7 +53,7 @@ public class TestRaftLogReadWrite extends BaseTest {
   private int bufferSize;
 
   @Before
-  public void setup() throws Exception {
+  public void setup() {
     storageDir = getTestDir();
     RaftProperties properties = new RaftProperties();
     RaftServerConfigKeys.setStorageDir(properties,  Collections.singletonList(storageDir));
@@ -89,7 +89,7 @@ public class TestRaftLogReadWrite extends BaseTest {
     long size = 0;
     for (int i = 0; i < entries.length; i++) {
       SimpleOperation m = new SimpleOperation("m" + i);
-      entries[i] = ServerProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, i);
+      entries[i] = LogProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, i);
       final int s = entries[i].getSerializedSize();
       size += CodedOutputStream.computeUInt32SizeNoTag(s) + s + 4;
       out.write(entries[i]);
@@ -102,8 +102,8 @@ public class TestRaftLogReadWrite extends BaseTest {
    */
   @Test
   public void testReadWriteLog() throws IOException {
-    final RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    File openSegment = storage.getStorageDir().getOpenLogFile(0);
+    final RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final File openSegment = LogSegmentStartEnd.valueOf(0).getFile(storage);
     long size = SegmentedRaftLogFormat.getHeaderLength();
 
     final LogEntryProto[] entries = new LogEntryProto[100];
@@ -116,21 +116,20 @@ public class TestRaftLogReadWrite extends BaseTest {
 
     Assert.assertEquals(size, openSegment.length());
 
-    LogEntryProto[] readEntries = readLog(openSegment, 0,
-        RaftServerConstants.INVALID_LOG_INDEX, true);
+    final LogEntryProto[] readEntries = readLog(openSegment, 0, RaftLog.INVALID_LOG_INDEX, true);
     Assert.assertArrayEquals(entries, readEntries);
   }
 
   @Test
   public void testAppendLog() throws IOException {
-    final RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    File openSegment = storage.getStorageDir().getOpenLogFile(0);
+    final RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final File openSegment = LogSegmentStartEnd.valueOf(0).getFile(storage);
     LogEntryProto[] entries = new LogEntryProto[200];
     try (SegmentedRaftLogOutputStream out = new SegmentedRaftLogOutputStream(openSegment, false,
         segmentMaxSize, preallocatedSize, ByteBuffer.allocateDirect(bufferSize))) {
       for (int i = 0; i < 100; i++) {
         SimpleOperation m = new SimpleOperation("m" + i);
-        entries[i] = ServerProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, i);
+        entries[i] = LogProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, i);
         out.write(entries[i]);
       }
     }
@@ -139,13 +138,12 @@ public class TestRaftLogReadWrite extends BaseTest {
         segmentMaxSize, preallocatedSize, ByteBuffer.allocateDirect(bufferSize))) {
       for (int i = 100; i < 200; i++) {
         SimpleOperation m = new SimpleOperation("m" + i);
-        entries[i] = ServerProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, i);
+        entries[i] = LogProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, i);
         out.write(entries[i]);
       }
     }
 
-    LogEntryProto[] readEntries = readLog(openSegment, 0,
-        RaftServerConstants.INVALID_LOG_INDEX, true);
+    final LogEntryProto[] readEntries = readLog(openSegment, 0, RaftLog.INVALID_LOG_INDEX, true);
     Assert.assertArrayEquals(entries, readEntries);
 
     storage.close();
@@ -157,8 +155,8 @@ public class TestRaftLogReadWrite extends BaseTest {
    */
   @Test
   public void testReadWithPadding() throws IOException {
-    final RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    File openSegment = storage.getStorageDir().getOpenLogFile(0);
+    final RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final File openSegment = LogSegmentStartEnd.valueOf(0).getFile(storage);
     long size = SegmentedRaftLogFormat.getHeaderLength();
 
     LogEntryProto[] entries = new LogEntryProto[100];
@@ -173,8 +171,7 @@ public class TestRaftLogReadWrite extends BaseTest {
         openSegment.length());
 
     // check if the reader can correctly read the log file
-    LogEntryProto[] readEntries = readLog(openSegment, 0,
-        RaftServerConstants.INVALID_LOG_INDEX, true);
+    final LogEntryProto[] readEntries = readLog(openSegment, 0, RaftLog.INVALID_LOG_INDEX, true);
     Assert.assertArrayEquals(entries, readEntries);
 
     out.close();
@@ -187,15 +184,15 @@ public class TestRaftLogReadWrite extends BaseTest {
    */
   @Test
   public void testReadWithCorruptPadding() throws IOException {
-    final RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    File openSegment = storage.getStorageDir().getOpenLogFile(0);
+    final RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final File openSegment = LogSegmentStartEnd.valueOf(0).getFile(storage);
 
     LogEntryProto[] entries = new LogEntryProto[10];
     final SegmentedRaftLogOutputStream out = new SegmentedRaftLogOutputStream(openSegment, false,
         16 * 1024 * 1024, 4 * 1024 * 1024, ByteBuffer.allocateDirect(bufferSize));
     for (int i = 0; i < 10; i++) {
       SimpleOperation m = new SimpleOperation("m" + i);
-      entries[i] = ServerProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, i);
+      entries[i] = LogProtoUtils.toLogEntryProto(m.getLogEntryContent(), 0, i);
       out.write(entries[i]);
     }
     out.flush();
@@ -211,7 +208,7 @@ public class TestRaftLogReadWrite extends BaseTest {
 
     List<LogEntryProto> list = new ArrayList<>();
     try (SegmentedRaftLogInputStream in = new SegmentedRaftLogInputStream(openSegment, 0,
-        RaftServerConstants.INVALID_LOG_INDEX, true)) {
+        RaftLog.INVALID_LOG_INDEX, true)) {
       LogEntryProto entry;
       while ((entry = in.nextEntry()) != null) {
         list.add(entry);
@@ -236,12 +233,12 @@ public class TestRaftLogReadWrite extends BaseTest {
    */
   @Test
   public void testReadWithEntryCorruption() throws IOException {
-    RaftStorage storage = new RaftStorage(storageDir, StartupOption.REGULAR);
-    File openSegment = storage.getStorageDir().getOpenLogFile(0);
+    RaftStorage storage = RaftStorageTestUtils.newRaftStorage(storageDir);
+    final File openSegment = LogSegmentStartEnd.valueOf(0).getFile(storage);
     try (SegmentedRaftLogOutputStream out = new SegmentedRaftLogOutputStream(openSegment, false,
         segmentMaxSize, preallocatedSize, ByteBuffer.allocateDirect(bufferSize))) {
       for (int i = 0; i < 100; i++) {
-        LogEntryProto entry = ServerProtoUtils.toLogEntryProto(
+        LogEntryProto entry = LogProtoUtils.toLogEntryProto(
             new SimpleOperation("m" + i).getLogEntryContent(), 0, i);
         out.write(entry);
       }
@@ -259,7 +256,7 @@ public class TestRaftLogReadWrite extends BaseTest {
     }
 
     try {
-      readLog(openSegment, 0, RaftServerConstants.INVALID_LOG_INDEX, true);
+      readLog(openSegment, 0, RaftLog.INVALID_LOG_INDEX, true);
       Assert.fail("The read of corrupted log file should fail");
     } catch (ChecksumException e) {
       LOG.info("Caught ChecksumException as expected", e);

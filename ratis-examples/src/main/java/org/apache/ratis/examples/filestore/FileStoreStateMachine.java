@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -17,13 +17,13 @@
  */
 package org.apache.ratis.examples.filestore;
 
-import org.apache.ratis.conf.ConfUtils;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.ExamplesProtos;
 import org.apache.ratis.proto.ExamplesProtos.DeleteReplyProto;
 import org.apache.ratis.proto.ExamplesProtos.DeleteRequestProto;
 import org.apache.ratis.proto.ExamplesProtos.FileStoreRequestProto;
 import org.apache.ratis.proto.ExamplesProtos.ReadRequestProto;
+import org.apache.ratis.proto.ExamplesProtos.StreamWriteRequestProto;
 import org.apache.ratis.proto.ExamplesProtos.WriteRequestHeaderProto;
 import org.apache.ratis.proto.ExamplesProtos.WriteRequestProto;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
@@ -41,9 +41,8 @@ import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.apache.ratis.thirdparty.com.google.protobuf.InvalidProtocolBufferException;
 import org.apache.ratis.util.FileUtils;
 
-import java.io.File;
 import java.io.IOException;
-import java.util.Objects;
+import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
 
 public class FileStoreStateMachine extends BaseStateMachine {
@@ -52,9 +51,7 @@ public class FileStoreStateMachine extends BaseStateMachine {
   private final FileStore files;
 
   public FileStoreStateMachine(RaftProperties properties) {
-    final File dir = ConfUtils.getFile(properties::getFile, FileStoreCommon.STATEMACHINE_DIR_KEY, null, LOG::info);
-    Objects.requireNonNull(dir, FileStoreCommon.STATEMACHINE_DIR_KEY + " is not set.");
-    this.files = new FileStore(this::getId, dir.toPath());
+    this.files = new FileStore(this::getId, properties);
   }
 
   @Override
@@ -62,7 +59,9 @@ public class FileStoreStateMachine extends BaseStateMachine {
       throws IOException {
     super.initialize(server, groupId, raftStorage);
     this.storage.init(raftStorage);
-    FileUtils.createDirectories(files.getRoot());
+    for (Path path : files.getRoots()) {
+      FileUtils.createDirectories(path);
+    }
   }
 
   @Override
@@ -86,7 +85,7 @@ public class FileStoreStateMachine extends BaseStateMachine {
     }
 
     final String path = proto.getPath().toStringUtf8();
-    return files.read(path, proto.getOffset(), proto.getLength())
+    return files.read(path, proto.getOffset(), proto.getLength(), true)
         .thenApply(reply -> Message.valueOf(reply.toByteString()));
   }
 
@@ -110,7 +109,7 @@ public class FileStoreStateMachine extends BaseStateMachine {
   }
 
   @Override
-  public CompletableFuture<Integer> writeStateMachineData(LogEntryProto entry) {
+  public CompletableFuture<Integer> write(LogEntryProto entry) {
     final StateMachineLogEntryProto smLog = entry.getStateMachineLogEntry();
     final ByteString data = smLog.getLogData();
     final FileStoreRequestProto proto;
@@ -126,13 +125,14 @@ public class FileStoreStateMachine extends BaseStateMachine {
 
     final WriteRequestHeaderProto h = proto.getWriteHeader();
     final CompletableFuture<Integer> f = files.write(entry.getIndex(),
-        h.getPath().toStringUtf8(), h.getClose(), h.getOffset(), smLog.getStateMachineEntry().getStateMachineData());
+        h.getPath().toStringUtf8(), h.getClose(),  h.getSync(), h.getOffset(),
+        smLog.getStateMachineEntry().getStateMachineData());
     // sync only if closing the file
     return h.getClose()? f: null;
   }
 
   @Override
-  public CompletableFuture<ByteString> readStateMachineData(LogEntryProto entry) {
+  public CompletableFuture<ByteString> read(LogEntryProto entry) {
     final StateMachineLogEntryProto smLog = entry.getStateMachineLogEntry();
     final ByteString data = smLog.getLogData();
     final FileStoreRequestProto proto;
@@ -148,9 +148,54 @@ public class FileStoreStateMachine extends BaseStateMachine {
 
     final WriteRequestHeaderProto h = proto.getWriteHeader();
     CompletableFuture<ExamplesProtos.ReadReplyProto> reply =
-        files.read(h.getPath().toStringUtf8(), h.getOffset(), h.getLength());
+        files.read(h.getPath().toStringUtf8(), h.getOffset(), h.getLength(), false);
 
     return reply.thenApply(ExamplesProtos.ReadReplyProto::getData);
+  }
+
+  static class LocalStream implements DataStream {
+    private final DataChannel dataChannel;
+
+    LocalStream(DataChannel dataChannel) {
+      this.dataChannel = dataChannel;
+    }
+
+    @Override
+    public DataChannel getDataChannel() {
+      return dataChannel;
+    }
+
+    @Override
+    public CompletableFuture<?> cleanUp() {
+      return CompletableFuture.supplyAsync(() -> {
+        try {
+          dataChannel.close();
+          return true;
+        } catch (IOException e) {
+          return FileStoreCommon.completeExceptionally("Failed to close data channel", e);
+        }
+      });
+    }
+  }
+
+  @Override
+  public CompletableFuture<DataStream> stream(RaftClientRequest request) {
+    final ByteString reqByteString = request.getMessage().getContent();
+    final FileStoreRequestProto proto;
+    try {
+      proto = FileStoreRequestProto.parseFrom(reqByteString);
+    } catch (InvalidProtocolBufferException e) {
+      return FileStoreCommon.completeExceptionally(
+          "Failed to parse stream header", e);
+    }
+    return files.createDataChannel(proto.getStream().getPath().toStringUtf8())
+        .thenApply(LocalStream::new);
+  }
+
+  @Override
+  public CompletableFuture<?> link(DataStream stream, LogEntryProto entry) {
+    LOG.info("linking {}", stream);
+    return files.streamLink(stream);
   }
 
   @Override
@@ -174,6 +219,8 @@ public class FileStoreStateMachine extends BaseStateMachine {
         return delete(index, request.getDelete());
       case WRITEHEADER:
         return writeCommit(index, request.getWriteHeader(), smLog.getStateMachineEntry().getStateMachineData().size());
+      case STREAM:
+        return streamCommit(request.getStream());
       case WRITE:
         // WRITE should not happen here since
         // startTransaction converts WRITE requests to WRITEHEADER requests.
@@ -189,6 +236,12 @@ public class FileStoreStateMachine extends BaseStateMachine {
     final String path = header.getPath().toStringUtf8();
     return files.submitCommit(index, path, header.getClose(), header.getOffset(), size)
         .thenApply(reply -> Message.valueOf(reply.toByteString()));
+  }
+
+  private CompletableFuture<Message> streamCommit(StreamWriteRequestProto stream) {
+    final String path = stream.getPath().toStringUtf8();
+    final long size = stream.getLength();
+    return files.streamCommit(path, size).thenApply(reply -> Message.valueOf(reply.toByteString()));
   }
 
   private CompletableFuture<Message> delete(long index, DeleteRequestProto request) {

@@ -18,20 +18,15 @@
 
 package org.apache.ratis.server.metrics;
 
-import static org.apache.ratis.server.metrics.LeaderElectionMetrics.LEADER_ELECTION_COUNT_METRIC;
-import static org.apache.ratis.server.metrics.LeaderElectionMetrics.LEADER_ELECTION_LATENCY;
+import static org.apache.ratis.server.metrics.LeaderElectionMetrics.LAST_LEADER_ELECTION_ELAPSED_TIME;
 import static org.apache.ratis.server.metrics.LeaderElectionMetrics.LEADER_ELECTION_TIMEOUT_COUNT_METRIC;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 import org.apache.ratis.metrics.RatisMetricRegistry;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.protocol.RaftGroupMemberId;
 import org.apache.ratis.protocol.RaftPeerId;
-import org.apache.ratis.server.impl.RaftServerImpl;
-import org.apache.ratis.server.impl.ServerState;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -44,35 +39,20 @@ public class TestLeaderElectionMetrics {
   private static RatisMetricRegistry ratisMetricRegistry;
 
   @BeforeClass
-  public static void setUp() throws Exception {
-    RaftServerImpl raftServer = mock(RaftServerImpl.class);
-    ServerState serverStateMock = mock(ServerState.class);
-    when(raftServer.getState()).thenReturn(serverStateMock);
-    when(serverStateMock.getLastLeaderElapsedTimeMs()).thenReturn(1000L);
+  public static void setUp() {
     RaftGroupId raftGroupId = RaftGroupId.randomId();
     RaftPeerId raftPeerId = RaftPeerId.valueOf("TestId");
     RaftGroupMemberId raftGroupMemberId = RaftGroupMemberId.valueOf(raftPeerId, raftGroupId);
-    when(raftServer.getMemberId()).thenReturn(raftGroupMemberId);
-    leaderElectionMetrics = LeaderElectionMetrics.getLeaderElectionMetrics(raftServer);
+    leaderElectionMetrics = LeaderElectionMetrics.getLeaderElectionMetrics(raftGroupMemberId, () -> 1000L);
     ratisMetricRegistry = leaderElectionMetrics.getRegistry();
   }
 
   @Test
-  public void testOnNewLeaderElection() throws Exception {
-    long numLeaderElections = ratisMetricRegistry.counter(
-        LEADER_ELECTION_COUNT_METRIC).getCount();
-    assertTrue(numLeaderElections == 0);
-    leaderElectionMetrics.onNewLeaderElection();
-    numLeaderElections = ratisMetricRegistry.counter(LEADER_ELECTION_COUNT_METRIC).getCount();
-    assertEquals(1, numLeaderElections);
-  }
-
-  @Test
   public void testOnLeaderElectionCompletion() throws Exception {
-    leaderElectionMetrics.onLeaderElectionCompletion(500L);
+    leaderElectionMetrics.onNewLeaderElectionCompletion();
     Long leaderElectionLatency = (Long) ratisMetricRegistry.getGauges((s, metric) ->
-        s.contains(LEADER_ELECTION_LATENCY)).values().iterator().next().getValue();
-    assertEquals(500L, leaderElectionLatency.longValue());
+        s.contains(LAST_LEADER_ELECTION_ELAPSED_TIME)).values().iterator().next().getValue();
+    assertTrue(leaderElectionLatency > 0L);
   }
 
   @Test

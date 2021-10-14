@@ -18,13 +18,13 @@
   <parent>
     <groupId>org.apache</groupId>
     <artifactId>apache</artifactId>
-    <version>18</version>
+    <version>23</version>
     <relativePath /> <!-- resolve from repository -->
   </parent>
 
   <artifactId>ratis</artifactId>
   <groupId>org.apache.ratis</groupId>
-  <version>0.6.0-SNAPSHOT</version>
+  <version>2.2.0-SNAPSHOT</version>
   <name>Apache Ratis</name>
   <packaging>pom</packaging>
   <description>
@@ -69,9 +69,11 @@
   </licenses>
 
   <modules>
+    <module>ratis-docs</module>
     <module>ratis-proto</module>
     <module>ratis-common</module>
     <module>ratis-client</module>
+    <module>ratis-server-api</module>
     <module>ratis-server</module>
     <module>ratis-resource-bundle</module>
     <module>ratis-grpc</module>
@@ -80,13 +82,12 @@
 
     <module>ratis-test</module>
 
-    <module>ratis-assembly</module>
     <module>ratis-examples</module>
     <module>ratis-replicated-map</module>
     <module>ratis-logservice</module>
     <module>ratis-metrics</module>
     <module>ratis-tools</module>
-    <module>ratis-docs</module>
+    <module>ratis-assembly</module>
   </modules>
 
   <pluginRepositories>
@@ -97,9 +98,9 @@
   </pluginRepositories>
 
   <scm>
-    <connection>scm:git:git://git.apache.org/incubator-ratis.git</connection>
-    <developerConnection>scm:git:https://git-wip-us.apache.org/repos/asf/incubator-ratis.git</developerConnection>
-    <url>https://git-wip-us.apache.org/repos/asf?p=incubator-ratis.git</url>
+    <connection>scm:git:git://git.apache.org/ratis.git</connection>
+    <developerConnection>scm:git:https://git-wip-us.apache.org/repos/asf/ratis.git</developerConnection>
+    <url>https://git-wip-us.apache.org/repos/asf?p=ratis.git</url>
     <tag>HEAD</tag>
   </scm>
 
@@ -117,9 +118,9 @@
     <mailingList>
       <name>User List</name>
       <subscribe>user-subscribe@ratis.apache.org</subscribe>
-      <unsubscribe>user-unsubscribe@ratis.incubator.apache.org</unsubscribe>
-      <post>user@ratis.incubator.apache.org</post>
-      <archive>https://lists.apache.org/list.html?dev@ratis.apache.org</archive>
+      <unsubscribe>user-unsubscribe@ratis.apache.org</unsubscribe>
+      <post>user@ratis.apache.org</post>
+      <archive>https://lists.apache.org/list.html?user@ratis.apache.org</archive>
       <otherArchives>
         <otherArchive>http://mail-archives.apache.org/mod_mbox/ratis-user/</otherArchive>
       </otherArchives>
@@ -129,7 +130,7 @@
       <subscribe>dev-subscribe@ratis.apache.org</subscribe>
       <unsubscribe>dev-unsubscribe@ratis.apache.org</unsubscribe>
       <post>dev@ratis.apache.org</post>
-      <archive>https://lists.apache.org/list.html?user@ratis.apache.org</archive>
+      <archive>https://lists.apache.org/list.html?dev@ratis.apache.org</archive>
       <otherArchives>
         <otherArchive>http://mail-archives.apache.org/mod_mbox/ratis-dev/</otherArchive>
       </otherArchives>
@@ -169,40 +170,22 @@
     <license.bundles.dependencies>false</license.bundles.dependencies>
 
     <!-- Maven plugin versions -->
-    <maven-antrun-plugin.version>1.7</maven-antrun-plugin.version>
-    <maven-assembly-plugin.version>3.1.1</maven-assembly-plugin.version>
     <maven-bundle-plugin.version>2.5.3</maven-bundle-plugin.version>
     <maven-checkstyle-plugin.version>3.1.0</maven-checkstyle-plugin.version>
-    <maven-clean-plugin.version>3.0.0</maven-clean-plugin.version>
     <maven-clover2-plugin.version>3.3.0</maven-clover2-plugin.version>
-    <maven-compiler-plugin.version>3.7.0</maven-compiler-plugin.version>
-    <maven-dependency-plugin.version>2.10</maven-dependency-plugin.version>
-    <maven-deploy-plugin.version>2.8.1</maven-deploy-plugin.version>
     <maven-install-plugin.version>3.0.0-M1</maven-install-plugin.version>
-    <maven-jar-plugin.version>3.0.2</maven-jar-plugin.version>
-    <maven-javadoc-plugin.version>2.10.3</maven-javadoc-plugin.version>
     <maven-pdf-plugin.version>1.2</maven-pdf-plugin.version>
-    <maven-resources-plugin.version>2.6</maven-resources-plugin.version>
-    <maven-shade-plugin.version>3.2.1</maven-shade-plugin.version>
-    <maven-site-plugin.version>3.5</maven-site-plugin.version>
-    <maven-source-plugin.version>2.3</maven-source-plugin.version>
     <maven-stylus-skin.version>1.5</maven-stylus-skin.version>
     <maven-surefire-plugin.version>3.0.0-M1</maven-surefire-plugin.version>
-    <maven-remote-resources-plugin.version>1.6.0</maven-remote-resources-plugin.version>
+
     <protobuf-maven-plugin.version>0.5.1</protobuf-maven-plugin.version>
     <license-maven-plugin.version>1.19</license-maven-plugin.version>
     <copy-rename-maven-plugin.version>1.0</copy-rename-maven-plugin.version>
 
-
-
-    <!--
-      ! Can be removed if changing to ASF parent version 19
-    -->
-    <apache-rat-plugin.version>0.12</apache-rat-plugin.version>
     <build-helper-maven-plugin.version>1.9</build-helper-maven-plugin.version>
     <exec-maven-plugin.version>1.6.0</exec-maven-plugin.version>
-    <findbugs.version>3.0.0</findbugs.version>
-    <native-maven-plugin.version>1.0-alpha-8</native-maven-plugin.version>
+    <spotbugs.version>4.2.1</spotbugs.version>
+    <spotbugs-plugin.version>4.2.0</spotbugs-plugin.version>
     <wagon-ssh.version>1.0</wagon-ssh.version>
 
     <distMgmtSnapshotsId>apache.snapshots.https</distMgmtSnapshotsId>
@@ -223,12 +206,13 @@
     <maven.min.version>3.3.9</maven.min.version>
 
     <!-- Contains all shaded thirdparty dependencies -->
-    <ratis.thirdparty.version>0.4.0</ratis.thirdparty.version>
+    <ratis.thirdparty.version>0.7.0</ratis.thirdparty.version>
 
     <!-- Need these for the protobuf compiler. *MUST* match what is in ratis-thirdparty -->
-    <shaded.protobuf.version>3.11.0</shaded.protobuf.version>
-    <shaded.grpc.version>1.28.1</shaded.grpc.version>
+    <shaded.protobuf.version>3.12.0</shaded.protobuf.version>
+    <shaded.grpc.version>1.33.0</shaded.grpc.version>
 
+    <hadoop.protobuf.version>2.5.0</hadoop.protobuf.version>
 
     <!-- Test properties -->
     <maven.test.redirectTestOutputToFile>true</maven.test.redirectTestOutputToFile>
@@ -253,6 +237,12 @@
     <dependencies>
       <!-- Internal dependencies -->
       <dependency>
+        <artifactId>ratis-docs</artifactId>
+        <groupId>org.apache.ratis</groupId>
+        <version>${project.version}</version>
+      </dependency>
+
+      <dependency>
         <artifactId>ratis-client</artifactId>
         <groupId>org.apache.ratis</groupId>
         <version>${project.version}</version>
@@ -289,6 +279,11 @@
         <version>${project.version}</version>
         <type>test-jar</type>
         <scope>test</scope>
+      </dependency>
+      <dependency>
+        <artifactId>ratis-experiments</artifactId>
+        <groupId>org.apache.ratis</groupId>
+        <version>${project.version}</version>
       </dependency>
       <dependency>
        <artifactId>ratis-metrics</artifactId>
@@ -372,6 +367,12 @@
       </dependency>
 
       <dependency>
+        <artifactId>ratis-server-api</artifactId>
+        <groupId>org.apache.ratis</groupId>
+        <version>${project.version}</version>
+      </dependency>
+
+      <dependency>
         <artifactId>ratis-server</artifactId>
         <groupId>org.apache.ratis</groupId>
         <version>${project.version}</version>
@@ -413,12 +414,6 @@
       <dependency>
         <groupId>org.apache.ratis</groupId>
         <artifactId>ratis-thirdparty-misc</artifactId>
-        <version>${ratis.thirdparty.version}</version>
-      </dependency>
-
-      <dependency>
-        <groupId>org.apache.ratis</groupId>
-        <artifactId>ratis-thirdparty-hadoop</artifactId>
         <version>${ratis.thirdparty.version}</version>
       </dependency>
 
@@ -471,14 +466,27 @@
       </dependency>
       <dependency>
         <groupId>org.mockito</groupId>
-        <artifactId>mockito-all</artifactId>
-        <version>1.8.5</version>
+        <artifactId>mockito-core</artifactId>
+        <version>3.5.15</version>
       </dependency>
 	    <dependency>
 	      <groupId>org.jline</groupId>
 	      <artifactId>jline</artifactId>
 	      <version>3.9.0</version>
 	    </dependency>
+
+      <dependency>
+        <groupId>javax.annotation</groupId>
+        <artifactId>javax.annotation-api</artifactId>
+        <version>1.2</version>
+      </dependency>
+
+      <dependency>
+        <groupId>com.github.spotbugs</groupId>
+        <artifactId>spotbugs-annotations</artifactId>
+        <version>${spotbugs.version}</version>
+        <optional>true</optional>
+      </dependency>
     </dependencies>
   </dependencyManagement>
 
@@ -494,14 +502,6 @@
     <pluginManagement>
       <plugins>
         <plugin>
-          <artifactId>maven-clean-plugin</artifactId>
-          <version>${maven-clean-plugin.version}</version>
-        </plugin>
-        <plugin>
-          <artifactId>maven-shade-plugin</artifactId>
-          <version>${maven-shade-plugin.version}</version>
-        </plugin>
-        <plugin>
           <groupId>org.xolstice.maven.plugins</groupId>
           <artifactId>protobuf-maven-plugin</artifactId>
           <version>${protobuf-maven-plugin.version}</version>
@@ -510,11 +510,6 @@
           <groupId>org.codehaus.mojo</groupId>
           <artifactId>build-helper-maven-plugin</artifactId>
           <version>${build-helper-maven-plugin.version}</version>
-        </plugin>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-remote-resources-plugin</artifactId>
-          <version>${maven-remote-resources-plugin.version}</version>
         </plugin>
         <plugin>
           <groupId>org.codehaus.mojo</groupId>
@@ -535,7 +530,6 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-javadoc-plugin</artifactId>
-          <version>${maven-javadoc-plugin.version}</version>
           <configuration>
             <additionalJOptions>
               <additionalJOption>-Xmaxwarns</additionalJOption>
@@ -545,19 +539,20 @@
           </configuration>
         </plugin>
         <plugin>
-          <groupId>org.codehaus.mojo</groupId>
-          <artifactId>findbugs-maven-plugin</artifactId>
-          <version>${findbugs.version}</version>
-        </plugin>
-        <plugin>
-          <groupId>org.codehaus.mojo</groupId>
-          <artifactId>native-maven-plugin</artifactId>
-          <version>${native-maven-plugin.version}</version>
-        </plugin>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-resources-plugin</artifactId>
-          <version>${maven-resources-plugin.version}</version>
+          <groupId>com.github.spotbugs</groupId>
+          <artifactId>spotbugs-maven-plugin</artifactId>
+          <version>${spotbugs-plugin.version}</version>
+          <dependencies>
+            <dependency>
+              <groupId>com.github.spotbugs</groupId>
+              <artifactId>spotbugs</artifactId>
+              <version>${spotbugs.version}</version>
+            </dependency>
+          </dependencies>
+          <configuration>
+            <fork>true</fork>
+            <maxHeap>2048</maxHeap>
+          </configuration>
         </plugin>
         <plugin>
           <groupId>org.codehaus.mojo</groupId>
@@ -578,11 +573,6 @@
 
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-dependency-plugin</artifactId>
-          <version>${maven-dependency-plugin.version}</version>
-        </plugin>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-enforcer-plugin</artifactId>
           <configuration>
             <rules>
@@ -598,7 +588,6 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-assembly-plugin</artifactId>
-          <version>${maven-assembly-plugin.version}</version>
           <configuration>
             <!--Defer to the ratis-assembly sub-module.  It does all assembly-->
             <skipAssembly>true</skipAssembly>
@@ -607,7 +596,6 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-compiler-plugin</artifactId>
-          <version>${maven-compiler-plugin.version}</version>
           <configuration>
             <source>${javac.version}</source>
             <target>${javac.version}</target>
@@ -641,7 +629,6 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-jar-plugin</artifactId>
-          <version>${maven-jar-plugin.version}</version>
           <executions>
             <execution>
               <phase>prepare-package</phase>
@@ -714,16 +701,15 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-deploy-plugin</artifactId>
-          <version>${maven-deploy-plugin.version}</version>
         </plugin>
         <plugin>
           <groupId>org.apache.rat</groupId>
           <artifactId>apache-rat-plugin</artifactId>
-          <version>${apache-rat-plugin.version}</version>
           <!-- target/ should get picked up from Apache parent pom.. -->
           <configuration>
             <!-- Lets us define more exclusions in child-modules without overriding these -->
             <excludes combine.children="append">
+              <exclude>.github/*.md</exclude>
               <exclude>target/*</exclude>
             </excludes>
           </configuration>
@@ -731,12 +717,10 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-antrun-plugin</artifactId>
-          <version>${maven-antrun-plugin.version}</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-site-plugin</artifactId>
-          <version>${maven-site-plugin.version}</version>
           <dependencies>
             <dependency><!-- add support for ssh/scp -->
               <groupId>org.apache.maven.wagon</groupId>
@@ -760,8 +744,8 @@
 
     <plugins>
       <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>findbugs-maven-plugin</artifactId>
+        <groupId>com.github.spotbugs</groupId>
+        <artifactId>spotbugs-maven-plugin</artifactId>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -838,10 +822,57 @@
           <includeReports>false</includeReports>
         </configuration>
       </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>buildnumber-maven-plugin</artifactId>
+        <version>1.4</version>
+        <executions>
+          <execution>
+            <phase>generate-resources</phase>
+            <goals>
+              <goal>create-metadata</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>target/classes</outputDirectory>
+              <outputName>ratis-version.properties</outputName>
+              <revisionOnScmFailure>Unknown</revisionOnScmFailure>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>add-source</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>${basedir}/target/generated-sources</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 
   <profiles>
+    <profile>
+      <id>experiments-build</id>
+      <activation>
+        <property>
+          <name>buildExp</name>
+        </property>
+      </activation>
+      <modules>
+        <module>ratis-experiments</module>
+      </modules>
+    </profile>
     <profile>
       <id>os.linux</id>
       <activation>
@@ -1017,6 +1048,58 @@
                 </goals>
               </execution>
             </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <id>grpc-tests</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <includes>
+                <include>org.apache.ratis.grpc.**</include>
+              </includes>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <profile>
+      <id>server-tests</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <includes>
+                <include>org.apache.ratis.datastream.**</include>
+                <include>org.apache.ratis.server.**</include>
+              </includes>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <profile>
+      <id>misc-tests</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <excludes>
+                <exclude>org.apache.ratis.datastream.**</exclude>
+                <exclude>org.apache.ratis.grpc.**</exclude>
+                <exclude>org.apache.ratis.server.**</exclude>
+              </excludes>
+            </configuration>
           </plugin>
         </plugins>
       </build>

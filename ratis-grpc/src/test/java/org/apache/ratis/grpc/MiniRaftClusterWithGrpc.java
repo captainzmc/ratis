@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -17,25 +17,29 @@
  */
 package org.apache.ratis.grpc;
 
-import org.apache.ratis.MiniRaftCluster;
 import org.apache.ratis.RaftConfigKeys;
 import org.apache.ratis.RaftTestUtil;
+import org.apache.ratis.conf.Parameters;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.grpc.server.GrpcService;
 import org.apache.ratis.protocol.RaftGroup;
+import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.apache.ratis.rpc.SupportedRpcType;
-import org.apache.ratis.server.impl.*;
-import org.apache.ratis.statemachine.StateMachine;
+import org.apache.ratis.server.impl.DelayLocalExecutionInjection;
+import org.apache.ratis.server.impl.MiniRaftCluster;
+import org.apache.ratis.util.NetUtils;
 
-import java.io.IOException;
+import java.util.Optional;
 
+/**
+ * A {@link MiniRaftCluster} with {{@link SupportedRpcType#GRPC}} and data stream disabled.
+ */
 public class MiniRaftClusterWithGrpc extends MiniRaftCluster.RpcBase {
   public static final Factory<MiniRaftClusterWithGrpc> FACTORY
       = new Factory<MiniRaftClusterWithGrpc>() {
     @Override
-    public MiniRaftClusterWithGrpc newCluster(
-        String[] ids, RaftProperties prop) {
+    public MiniRaftClusterWithGrpc newCluster(String[] ids, RaftProperties prop) {
       RaftConfigKeys.Rpc.setType(prop, SupportedRpcType.GRPC);
       return new MiniRaftClusterWithGrpc(ids, prop);
     }
@@ -51,16 +55,18 @@ public class MiniRaftClusterWithGrpc extends MiniRaftCluster.RpcBase {
   public static final DelayLocalExecutionInjection sendServerRequestInjection =
       new DelayLocalExecutionInjection(GrpcService.GRPC_SEND_SERVER_REQUEST);
 
-  private MiniRaftClusterWithGrpc(String[] ids, RaftProperties properties) {
+  protected MiniRaftClusterWithGrpc(String[] ids, RaftProperties properties) {
     super(ids, properties, null);
   }
 
   @Override
-  protected RaftServerProxy newRaftServer(
-      RaftPeerId id, StateMachine.Registry stateMachineRegistry, RaftGroup group,
-      RaftProperties properties) throws IOException {
+  protected Parameters setPropertiesAndInitParameters(RaftPeerId id, RaftGroup group, RaftProperties properties) {
     GrpcConfigKeys.Server.setPort(properties, getPort(id, group));
-    return ServerImplUtils.newRaftServer(id, group, stateMachineRegistry, properties, null);
+    Optional.ofNullable(getAddress(id, group, RaftPeer::getClientAddress)).ifPresent(address ->
+        GrpcConfigKeys.Client.setPort(properties, NetUtils.createSocketAddr(address).getPort()));
+    Optional.ofNullable(getAddress(id, group, RaftPeer::getAdminAddress)).ifPresent(address ->
+        GrpcConfigKeys.Admin.setPort(properties, NetUtils.createSocketAddr(address).getPort()));
+    return null;
   }
 
   @Override

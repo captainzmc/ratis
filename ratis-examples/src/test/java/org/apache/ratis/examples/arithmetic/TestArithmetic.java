@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,7 +18,7 @@
 package org.apache.ratis.examples.arithmetic;
 
 import org.apache.log4j.Level;
-import org.apache.ratis.MiniRaftCluster;
+import org.apache.ratis.server.impl.MiniRaftCluster;
 import org.apache.ratis.client.RaftClient;
 import org.apache.ratis.examples.ParameterizedBaseTest;
 import org.apache.ratis.examples.arithmetic.expression.DoubleValue;
@@ -45,7 +45,7 @@ public class TestArithmetic extends ParameterizedBaseTest {
   }
 
   @Parameterized.Parameters
-  public static Collection<Object[]> data() throws IOException {
+  public static Collection<Object[]> data() {
     return getMiniRaftClusters(ArithmeticStateMachine.class, 3);
   }
 
@@ -153,7 +153,7 @@ public class TestArithmetic extends ParameterizedBaseTest {
   }
 
   static Expression assign(RaftClient client, Variable x, Expression e, Double expected) throws IOException {
-    final RaftClientReply r = client.send(x.assign(e));
+    final RaftClientReply r = client.io().send(x.assign(e));
     return assertRaftClientReply(r, expected);
   }
 

@@ -18,7 +18,6 @@
 
 package org.apache.ratis.server.impl;
 
-import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.RaftProtos.LogEntryProto;
 import org.apache.ratis.proto.RaftProtos.RaftPeerRole;
 import org.apache.ratis.protocol.RaftPeerId;
@@ -40,7 +39,7 @@ class RoleInfo {
   private final RaftPeerId id;
   private volatile RaftPeerRole role;
   /** Used when the peer is leader */
-  private final AtomicReference<LeaderState> leaderState = new AtomicReference<>();
+  private final AtomicReference<LeaderStateImpl> leaderState = new AtomicReference<>();
   /** Used when the peer is follower, to monitor election timeout */
   private final AtomicReference<FollowerState> followerState = new AtomicReference<>();
   /** Used when the peer is candidate, to request votes from other peers */
@@ -51,10 +50,6 @@ class RoleInfo {
   RoleInfo(RaftPeerId id) {
     this.id = id;
     this.transitionTime = new AtomicReference<>(Timestamp.currentTime());
-  }
-
-  RaftPeerRole getRaftPeerRole() {
-    return role;
   }
 
   void transitionRole(RaftPeerRole newRole) {
@@ -70,38 +65,30 @@ class RoleInfo {
     return role;
   }
 
-  boolean isFollower() {
-    return role == RaftPeerRole.FOLLOWER;
+  boolean isLeaderReady() {
+    return getLeaderState().map(LeaderStateImpl::isReady).orElse(false);
   }
 
-  boolean isCandidate() {
-    return role == RaftPeerRole.CANDIDATE;
-  }
-
-  boolean isLeader() {
-    return role == RaftPeerRole.LEADER;
-  }
-
-  Optional<LeaderState> getLeaderState() {
+  Optional<LeaderStateImpl> getLeaderState() {
     return Optional.ofNullable(leaderState.get());
   }
 
-  LeaderState getLeaderStateNonNull() {
+  LeaderStateImpl getLeaderStateNonNull() {
     return Objects.requireNonNull(leaderState.get(), "leaderState is null");
   }
 
-  LogEntryProto startLeaderState(RaftServerImpl server, RaftProperties properties) {
-    return updateAndGet(leaderState, new LeaderState(server, properties)).start();
+  LogEntryProto startLeaderState(RaftServerImpl server) {
+    return updateAndGet(leaderState, new LeaderStateImpl(server)).start();
   }
 
   void shutdownLeaderState(boolean allowNull) {
-    final LeaderState leader = leaderState.getAndSet(null);
+    final LeaderStateImpl leader = leaderState.getAndSet(null);
     if (leader == null) {
       if (!allowNull) {
         throw new NullPointerException("leaderState == null");
       }
     } else {
-      LOG.info("{}: shutdown {}", id, leader.getClass().getSimpleName());
+      LOG.info("{}: shutdown {}", id, leader);
       leader.stop();
     }
     // TODO: make sure that StateMachineUpdater has applied all transactions that have context
@@ -111,27 +98,27 @@ class RoleInfo {
     return Optional.ofNullable(followerState.get());
   }
 
-  void startFollowerState(RaftServerImpl server) {
-    updateAndGet(followerState, new FollowerState(server)).start();
+  void startFollowerState(RaftServerImpl server, Object reason) {
+    updateAndGet(followerState, new FollowerState(server, reason)).start();
   }
 
   void shutdownFollowerState() {
     final FollowerState follower = followerState.getAndSet(null);
     if (follower != null) {
-      LOG.info("{}: shutdown {}", id, follower.getClass().getSimpleName());
+      LOG.info("{}: shutdown {}", id, follower);
       follower.stopRunning();
       follower.interrupt();
     }
   }
 
-  void startLeaderElection(RaftServerImpl server) {
-    updateAndGet(leaderElection, new LeaderElection(server)).start();
+  void startLeaderElection(RaftServerImpl server, boolean force) {
+    updateAndGet(leaderElection, new LeaderElection(server, force)).start();
   }
 
   void shutdownLeaderElection() {
     final LeaderElection election = leaderElection.getAndSet(null);
     if (election != null) {
-      LOG.info("{}: shutdown {}", id, election.getClass().getSimpleName());
+      LOG.info("{}: shutdown {}", id, election);
       election.shutdown();
       // no need to interrupt the election thread
     }
@@ -140,7 +127,7 @@ class RoleInfo {
   private <T> T updateAndGet(AtomicReference<T> ref, T current) {
     final T updated = ref.updateAndGet(previous -> previous != null? previous: current);
     Preconditions.assertTrue(updated == current, "previous != null");
-    LOG.info("{}: start {}", id, current.getClass().getSimpleName());
+    LOG.info("{}: start {}", id, current);
     return updated;
   }
 

@@ -25,7 +25,6 @@ import org.slf4j.LoggerFactory;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
-import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Collection;
 import java.util.Date;
@@ -35,7 +34,10 @@ import java.util.TimerTask;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -47,11 +49,15 @@ import java.util.function.Supplier;
 public interface JavaUtils {
   Logger LOG = LoggerFactory.getLogger(JavaUtils.class);
 
-  DateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd hh:mm:ss,SSS");
   CompletableFuture[] EMPTY_COMPLETABLE_FUTURE_ARRAY = {};
 
+  ConcurrentMap<Class<?>, String> CLASS_SIMPLE_NAMES = new ConcurrentHashMap<>();
+  static String getClassSimpleName(Class<?> clazz) {
+    return CLASS_SIMPLE_NAMES.computeIfAbsent(clazz, Class::getSimpleName);
+  }
+
   static String date() {
-    return DATE_FORMAT.format(new Date());
+    return new SimpleDateFormat("yyyy-MM-dd hh:mm:ss,SSS").format(new Date());
   }
 
   /**
@@ -227,6 +233,16 @@ public interface JavaUtils {
     return CompletableFuture.allOf(futures.toArray(EMPTY_COMPLETABLE_FUTURE_ARRAY));
   }
 
+  static <V> BiConsumer<V, Throwable> asBiConsumer(CompletableFuture<V> future) {
+    return (v, t) -> {
+      if (t != null) {
+        future.completeExceptionally(t);
+      } else {
+        future.complete(v);
+      }
+    };
+  }
+
   static <OUTPUT, THROWABLE extends Throwable> OUTPUT supplyAndWrapAsCompletionException(
       CheckedSupplier<OUTPUT, THROWABLE> supplier) {
     try {
@@ -237,17 +253,4 @@ public interface JavaUtils {
       throw new CompletionException(t);
     }
   }
-
-  static boolean sleep(long sleepMs, long thresholdMs) throws InterruptedException {
-    final Timestamp t = Timestamp.currentTime();
-    Thread.sleep(sleepMs);
-    final long elapsedMs = t.elapsedTimeMs();
-    if (elapsedMs - sleepMs > thresholdMs) {
-      LOG.warn("Unexpected long sleep: sleep({}ms) actually took {}ms which is over the threshold {}ms",
-          sleepMs, elapsedMs, thresholdMs);
-      return false;
-    }
-    return true;
-  }
-
 }

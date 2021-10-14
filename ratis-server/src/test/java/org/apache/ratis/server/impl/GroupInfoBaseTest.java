@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,10 +19,11 @@ package org.apache.ratis.server.impl;
 
 import org.apache.log4j.Level;
 import org.apache.ratis.BaseTest;
-import org.apache.ratis.MiniRaftCluster;
 import org.apache.ratis.client.RaftClient;
+import org.apache.ratis.client.api.GroupManagementApi;
 import org.apache.ratis.protocol.*;
 import org.apache.ratis.proto.RaftProtos.CommitInfoProto;
+import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.util.Log4jUtils;
 import org.junit.Assert;
 import org.junit.Test;
@@ -35,7 +36,7 @@ public abstract class GroupInfoBaseTest<CLUSTER extends MiniRaftCluster>
     extends BaseTest
     implements MiniRaftCluster.Factory.Get<CLUSTER> {
   {
-    Log4jUtils.setLogLevel(RaftServerImpl.LOG, Level.DEBUG);
+    Log4jUtils.setLogLevel(RaftServer.Division.LOG, Level.DEBUG);
     Log4jUtils.setLogLevel(RaftClient.LOG, Level.DEBUG);
   }
 
@@ -50,27 +51,28 @@ public abstract class GroupInfoBaseTest<CLUSTER extends MiniRaftCluster>
 
     List<RaftPeer> peers = cluster.getPeers();
 
-    //Multi-raft with the second group
+    // Multi-raft with the second group
     RaftGroup group2 = RaftGroup.valueOf(RaftGroupId.randomId(), peers);
     for(RaftPeer peer : peers) {
       try(final RaftClient client = cluster.createClient(peer.getId())) {
-        client.groupAdd(group2, peer.getId());
+        client.getGroupManagementApi(peer.getId()).add(group2);
       }
     }
     // check that all the peers return the list where both groups are included. And able to return GroupInfo
     // for each of them.
     for (RaftPeer peer : peers) {
       try (final RaftClient client = cluster.createClient(peer.getId())) {
-        GroupListReply info = client.getGroupList(peer.getId());
+        final GroupManagementApi api = client.getGroupManagementApi(peer.getId());
+        final GroupListReply info = api.list();
         List<RaftGroupId> groupList = info.getGroupIds().stream()
             .filter(id -> group.getGroupId().equals(id)).collect(Collectors.toList());
         assert (groupList.size() == 1);
-        final GroupInfoReply gi = client.getGroupInfo(groupList.get(0), peer.getId());
+        final GroupInfoReply gi = api.info(groupList.get(0));
         assert (sameGroup(group, gi.getGroup()));
         groupList = info.getGroupIds().stream()
             .filter(id -> group2.getGroupId().equals(id)).collect(Collectors.toList());
         assert (groupList.size() == 1);
-        final GroupInfoReply gi2 = client.getGroupInfo(groupList.get(0), peer.getId());
+        final GroupInfoReply gi2 = api.info(groupList.get(0));
         assert (sameGroup(group2, gi2.getGroup()));
       }
     }
@@ -89,9 +91,7 @@ public abstract class GroupInfoBaseTest<CLUSTER extends MiniRaftCluster>
       // send more messages and check last reply
       final RaftClientReply reply = sendMessages(numMessages, cluster);
       for(CommitInfoProto i : reply.getCommitInfos()) {
-        if (RaftPeerId.valueOf(i.getServer().getId()).equals(killedFollower)) {
-          Assert.assertTrue(i.getCommitIndex() <= maxCommit);
-        } else {
+        if (!RaftPeerId.valueOf(i.getServer().getId()).equals(killedFollower)) {
           Assert.assertTrue(i.getCommitIndex() > maxCommit);
         }
       }
@@ -103,7 +103,7 @@ public abstract class GroupInfoBaseTest<CLUSTER extends MiniRaftCluster>
         continue;
       }
       try(final RaftClient client = cluster.createClient(peer.getId())) {
-        GroupListReply info = client.getGroupList(peer.getId());
+        final GroupListReply info = client.getGroupManagementApi(peer.getId()).list();
         Assert.assertEquals(1, info.getGroupIds().stream().filter(id -> group.getGroupId().equals(id)).count());
         for(CommitInfoProto i : info.getCommitInfos()) {
           if (RaftPeerId.valueOf(i.getServer().getId()).equals(killedFollower)) {
@@ -121,7 +121,7 @@ public abstract class GroupInfoBaseTest<CLUSTER extends MiniRaftCluster>
     RaftClientReply reply = null;
     try(final RaftClient client = cluster.createClient()) {
       for(int i = 0; i < n; i++) {
-        reply = client.send(Message.valueOf("m" + i));
+        reply = client.io().send(Message.valueOf("m" + i));
       }
     }
     return reply;

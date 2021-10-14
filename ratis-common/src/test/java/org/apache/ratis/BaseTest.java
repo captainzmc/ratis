@@ -19,6 +19,7 @@ package org.apache.ratis;
 
 import org.apache.log4j.Level;
 import org.apache.ratis.conf.ConfUtils;
+import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.util.ExitUtils;
 import org.apache.ratis.util.FileUtils;
 import org.apache.ratis.util.JavaUtils;
@@ -35,6 +36,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
@@ -63,6 +66,17 @@ public abstract class BaseTest {
     if (firstException.compareAndSet(null, e)) {
       LOG.error("Set firstException", e);
     }
+  }
+
+  public List<RaftPeer> getPeersWithPriority(List<RaftPeer> peers, RaftPeer suggestedLeader) {
+    List<RaftPeer> peersWithPriority = new ArrayList<>();
+    for (int i = 0; i < peers.size(); i++) {
+      RaftPeer peer = peers.get(i);
+      final int priority = peer.equals(suggestedLeader)? 2: 1;
+      peersWithPriority.add(
+          RaftPeer.newBuilder(peer).setPriority(priority).build());
+    }
+    return peersWithPriority;
   }
 
   @After
@@ -103,7 +117,7 @@ public abstract class BaseTest {
   }
 
   public File getClassTestDir() {
-    return new File(getRootTestDir(), getClass().getSimpleName());
+    return new File(getRootTestDir(), JavaUtils.getClassSimpleName(getClass()));
   }
 
   public File getTestDir() {
@@ -116,7 +130,7 @@ public abstract class BaseTest {
       Class<? extends Throwable> expectedThrowableClass, Logger log,
       Class<? extends Throwable>... expectedCauseClasses) {
     if (log != null) {
-      log.info("The test \"" + description + "\" throws " + t.getClass().getSimpleName(), t);
+      log.info("The test \"{}\" throws {}", description,  JavaUtils.getClassSimpleName(t.getClass()), t);
     }
     Assert.assertEquals(expectedThrowableClass, t.getClass());
 
