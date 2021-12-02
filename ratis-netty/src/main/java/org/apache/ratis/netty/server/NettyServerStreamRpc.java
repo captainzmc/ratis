@@ -195,6 +195,8 @@ public class NettyServerStreamRpc implements DataStreamServerRpc {
       public void exceptionCaught(ChannelHandlerContext ctx, Throwable throwable) {
         Optional.ofNullable(requestRef.getAndSetNull())
             .ifPresent(request -> requests.replyDataStreamException(throwable, request, ctx));
+        LOG.warn(name + ": exceptionCaught", throwable);
+        ctx.close();
       }
     };
   }

@@ -378,13 +378,17 @@ public class DataStreamManagement {
       final MemoizedSupplier<StreamInfo> supplier = JavaUtils.memoize(() -> newStreamInfo(buf, getStreams));
       info = streams.computeIfAbsent(key, id -> supplier.get());
       if (!supplier.isInitialized()) {
+        LOG.error("Streaming===Failed to create a new stream for " + request
+            + " since a stream already exists Key: " + key + " StreamInfo:" + info);
         throw new IllegalStateException("Failed to create a new stream for " + request
             + " since a stream already exists Key: " + key + " StreamInfo:" + info);
       }
     } else if (close) {
+      LOG.error("Streaming===Failed to remove StreamInfo for " + request);
       info = Optional.ofNullable(streams.remove(key)).orElseThrow(
           () -> new IllegalStateException("Failed to remove StreamInfo for " + request));
     } else {
+      LOG.error("Streaming===Failed to get StreamInfo for " + request);
       info = Optional.ofNullable(streams.get(key)).orElseThrow(
           () -> new IllegalStateException("Failed to get StreamInfo for " + request));
     }
@@ -420,6 +424,7 @@ public class DataStreamManagement {
         }, requestExecutor)).whenComplete((v, exception) -> {
       try {
         if (exception != null) {
+          LOG.warn("Streaming==="+ this + ": Unexpected type " + request.getType() + ", request=" + request);
           replyDataStreamException(server, exception, info.getRequest(), request, ctx);
         }
       } finally {
