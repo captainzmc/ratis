@@ -63,6 +63,7 @@ class AsyncImpl implements AsyncRpcApi {
 
   @Override
   public CompletableFuture<RaftClientReply> sendForward(RaftClientRequest request) {
+
     final RaftProtos.RaftClientRequestProto proto = ClientProtoUtils.toRaftClientRequestProto(request);
     return send(RaftClientRequest.forwardRequestType(), Message.valueOf(proto.toByteString()), null);
   }

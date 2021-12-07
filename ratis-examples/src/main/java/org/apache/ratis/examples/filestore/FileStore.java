@@ -269,6 +269,8 @@ public class FileStore implements Closeable {
         len = file.length();
         return StreamWriteReplyProto.newBuilder().setIsSuccess(len == bytesWritten).setByteWritten(len).build();
       } catch (IOException e) {
+        LOG.error("====streamCommit====threadID:"+Thread.currentThread().toString()+Thread.currentThread().getId()+"===="+p);
+        e.printStackTrace();
         throw new CompletionException("Failed to commit stream write on file:" + p +
         ", expected written bytes:" + bytesWritten + ", actual written bytes:" + len, e);
       }

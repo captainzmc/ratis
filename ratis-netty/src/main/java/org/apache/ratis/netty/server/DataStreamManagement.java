@@ -84,9 +84,9 @@ public class DataStreamManagement {
       this.writeFuture = new AtomicReference<>(streamFuture.thenApply(s -> 0L));
     }
 
-    CompletableFuture<Long> write(ByteBuf buf, WriteOption[] options, Executor executor) {
+    CompletableFuture<Long> write(ByteBuf buf, WriteOption[] options, Executor executor, DataStreamRequestByteBuf re) {
       return composeAsync(writeFuture, executor,
-          n -> streamFuture.thenCompose(stream -> writeToAsync(buf, options, stream, executor)));
+          n -> streamFuture.thenCompose(stream -> writeToAsync(buf, options, stream, executor, re)));
     }
   }
 
@@ -259,18 +259,19 @@ public class DataStreamManagement {
   }
 
   static CompletableFuture<Long> writeToAsync(ByteBuf buf, WriteOption[] options, DataStream stream,
-      Executor defaultExecutor) {
+      Executor defaultExecutor, DataStreamRequestByteBuf re) {
     final Executor e = Optional.ofNullable(stream.getExecutor()).orElse(defaultExecutor);
-    return CompletableFuture.supplyAsync(() -> writeTo(buf, options, stream), e);
+    return CompletableFuture.supplyAsync(() -> writeTo(buf, options, stream, re), e);
   }
 
-  static long writeTo(ByteBuf buf, WriteOption[] options, DataStream stream) {
+  static long writeTo(ByteBuf buf, WriteOption[] options, DataStream stream, DataStreamRequestByteBuf request) {
     final DataChannel channel = stream.getDataChannel();
     long byteWritten = 0;
     for (ByteBuffer buffer : buf.nioBuffers()) {
       try {
         byteWritten += channel.write(buffer);
       } catch (Throwable t) {
+        t.printStackTrace();
         throw new CompletionException(t);
       }
     }
@@ -279,12 +280,14 @@ public class DataStreamManagement {
       try {
         channel.force(false);
       } catch (IOException e) {
+        e.printStackTrace();
         throw new CompletionException(e);
       }
     }
 
     if (WriteOption.containsOption(options, StandardWriteOption.CLOSE)) {
       close(stream);
+      LOG.warn("Streaming===colse==threadID:"+Thread.currentThread().toString()+Thread.currentThread().getId()+"==request=" + request);
     }
     return byteWritten;
   }
@@ -293,6 +296,7 @@ public class DataStreamManagement {
     try {
       stream.getDataChannel().close();
     } catch (IOException e) {
+      e.printStackTrace();
       throw new CompletionException("Failed to close " + stream, e);
     }
   }
@@ -332,7 +336,13 @@ public class DataStreamManagement {
           .async());
       return asyncRpcApi.sendForward(info.request).thenAcceptAsync(
           reply -> ctx.writeAndFlush(newDataStreamReplyByteBuffer(request, reply, bytesWritten, info.getCommitInfos())),
-          requestExecutor);
+          requestExecutor).whenComplete((v, exception) -> {
+          if (exception != null) {
+            LOG.warn("Streaming===startTransaction===threadID:"+Thread.currentThread().toString()+Thread.currentThread().getId()+"====request=" + request);
+            exception.printStackTrace();
+            throw new CompletionException(exception);
+          }
+      });
     } catch (IOException e) {
       throw new CompletionException(e);
     }
@@ -378,17 +388,14 @@ public class DataStreamManagement {
       final MemoizedSupplier<StreamInfo> supplier = JavaUtils.memoize(() -> newStreamInfo(buf, getStreams));
       info = streams.computeIfAbsent(key, id -> supplier.get());
       if (!supplier.isInitialized()) {
-        LOG.error("Streaming===Failed to create a new stream for " + request
-            + " since a stream already exists Key: " + key + " StreamInfo:" + info);
         throw new IllegalStateException("Failed to create a new stream for " + request
             + " since a stream already exists Key: " + key + " StreamInfo:" + info);
       }
     } else if (close) {
-      LOG.error("Streaming===Failed to remove StreamInfo for " + request);
       info = Optional.ofNullable(streams.remove(key)).orElseThrow(
           () -> new IllegalStateException("Failed to remove StreamInfo for " + request));
     } else {
-      LOG.error("Streaming===Failed to get StreamInfo for " + request);
+      LOG.error("Streaming==write===threadID:"+Thread.currentThread().toString()+Thread.currentThread().getId()+"======" + request);
       info = Optional.ofNullable(streams.get(key)).orElseThrow(
           () -> new IllegalStateException("Failed to get StreamInfo for " + request));
     }
@@ -399,7 +406,7 @@ public class DataStreamManagement {
       localWrite = CompletableFuture.completedFuture(0L);
       remoteWrites = Collections.emptyList();
     } else if (request.getType() == Type.STREAM_DATA) {
-      localWrite = info.getLocal().write(buf, request.getWriteOptions(), writeExecutor);
+      localWrite = info.getLocal().write(buf, request.getWriteOptions(), writeExecutor, request);
       remoteWrites = info.applyToRemotes(out -> out.write(request, requestExecutor));
     } else {
       throw new IllegalStateException(this + ": Unexpected type " + request.getType() + ", request=" + request);
@@ -411,10 +418,12 @@ public class DataStreamManagement {
               || (request.getType() == Type.STREAM_DATA && !close)) {
             sendReply(remoteWrites, request, bytesWritten, info.getCommitInfos(), ctx);
           } else if (close) {
+//            sendReply(remoteWrites, request, bytesWritten, info.getCommitInfos(), ctx);
             if (info.isPrimary()) {
               // after all server close stream, primary server start transaction
               startTransaction(info, request, bytesWritten, ctx);
-            } else {
+            }
+            else {
               sendReply(remoteWrites, request, bytesWritten, info.getCommitInfos(), ctx);
             }
           } else {
