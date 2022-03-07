@@ -21,6 +21,8 @@ import org.apache.ratis.client.DataStreamClient;
 import org.apache.ratis.client.RaftClient;
 import org.apache.ratis.client.RaftClientRpc;
 import org.apache.ratis.client.api.DataStreamApi;
+import org.apache.ratis.client.api.LeaderElectionManagementApi;
+import org.apache.ratis.client.api.SnapshotManagementApi;
 import org.apache.ratis.client.retry.ClientRetryEvent;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.proto.RaftProtos.SlidingWindowEntry;
@@ -139,7 +141,10 @@ public final class RaftClientImpl implements RaftClient {
   private final MemoizedSupplier<DataStreamApi> dataStreamApi;
 
   private final Supplier<AdminImpl> adminApi;
-  private final ConcurrentMap<RaftPeerId, GroupManagementImpl> groupManagmenets = new ConcurrentHashMap<>();
+  private final ConcurrentMap<RaftPeerId, GroupManagementImpl> groupManagement = new ConcurrentHashMap<>();
+  private final ConcurrentMap<RaftPeerId, SnapshotManagementApi> snapshotManagement = new ConcurrentHashMap<>();
+  private final ConcurrentMap<RaftPeerId, LeaderElectionManagementApi>
+      leaderElectionManagement = new ConcurrentHashMap<>();
 
   RaftClientImpl(ClientId clientId, RaftGroup group, RaftPeerId leaderId, RaftPeer primaryDataStreamServer,
       RaftClientRpc clientRpc, RaftProperties properties, RetryPolicy retryPolicy) {
@@ -240,7 +245,22 @@ public final class RaftClientImpl implements RaftClient {
 
   @Override
   public GroupManagementImpl getGroupManagementApi(RaftPeerId server) {
-    return groupManagmenets.computeIfAbsent(server, id -> new GroupManagementImpl(id, this));
+    return groupManagement.computeIfAbsent(server, id -> new GroupManagementImpl(id, this));
+  }
+
+  @Override
+  public SnapshotManagementApi getSnapshotManagementApi() {
+    return JavaUtils.memoize(() -> new SnapshotManagementImpl(null, this)).get();
+  }
+
+  @Override
+  public SnapshotManagementApi getSnapshotManagementApi(RaftPeerId server) {
+    return snapshotManagement.computeIfAbsent(server, id -> new SnapshotManagementImpl(id, this));
+  }
+
+  @Override
+  public LeaderElectionManagementApi getLeaderElectionManagementApi(RaftPeerId server) {
+    return leaderElectionManagement.computeIfAbsent(server, id -> new LeaderElectionManagementImpl(id, this));
   }
 
   @Override

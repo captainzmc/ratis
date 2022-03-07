@@ -28,6 +28,7 @@ import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.server.raftlog.RaftLog.EntryWithData;
 import org.apache.ratis.server.raftlog.RaftLogIOException;
 import org.apache.ratis.statemachine.SnapshotInfo;
+import org.apache.ratis.util.AwaitForSignal;
 import org.apache.ratis.util.DataQueue;
 import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.Preconditions;
@@ -50,6 +51,7 @@ public abstract class LogAppenderBase implements LogAppender {
   private final int snapshotChunkMaxSize;
 
   private final LogAppenderDaemon daemon;
+  private final AwaitForSignal eventAwaitForSignal;
 
   protected LogAppenderBase(RaftServer.Division server, LeaderState leaderState, FollowerInfo f) {
     this.follower = f;
@@ -64,6 +66,12 @@ public abstract class LogAppenderBase implements LogAppender {
     final int bufferElementLimit = RaftServerConfigKeys.Log.Appender.bufferElementLimit(properties);
     this.buffer = new DataQueue<>(this, bufferByteLimit, bufferElementLimit, EntryWithData::getSerializedSize);
     this.daemon = new LogAppenderDaemon(this);
+    this.eventAwaitForSignal = new AwaitForSignal(name);
+  }
+
+  @Override
+  public AwaitForSignal getEventAwaitForSignal() {
+    return eventAwaitForSignal;
   }
 
   @Override
@@ -127,8 +135,8 @@ public abstract class LogAppenderBase implements LogAppender {
   public AppendEntriesRequestProto newAppendEntriesRequest(long callId, boolean heartbeat) throws RaftLogIOException {
     final TermIndex previous = getPrevious(follower.getNextIndex());
     final long snapshotIndex = follower.getSnapshotIndex();
-    final long heartbeatRemainingMs = getHeartbeatRemainingTimeMs();
-    if (heartbeatRemainingMs <= 0L || heartbeat) {
+    final long heartbeatWaitTimeMs = getHeartbeatWaitTimeMs();
+    if (heartbeatWaitTimeMs <= 0L || heartbeat) {
       // heartbeat
       return leaderState.newAppendEntriesRequestProto(follower, Collections.emptyList(), previous, callId);
     }
@@ -137,8 +145,8 @@ public abstract class LogAppenderBase implements LogAppender {
 
     final long leaderNext = getRaftLog().getNextIndex();
     final long followerNext = follower.getNextIndex();
-    final long halfMs = heartbeatRemainingMs/2;
-    for (long next = followerNext; leaderNext > next && getHeartbeatRemainingTimeMs() - halfMs > 0; ) {
+    final long halfMs = heartbeatWaitTimeMs/2;
+    for (long next = followerNext; leaderNext > next && getHeartbeatWaitTimeMs() - halfMs > 0; ) {
       if (!buffer.offer(getRaftLog().getEntryWithData(next++))) {
         break;
       }
@@ -147,9 +155,8 @@ public abstract class LogAppenderBase implements LogAppender {
       return null;
     }
 
-    final List<LogEntryProto> protos = buffer.pollList(getHeartbeatRemainingTimeMs(), EntryWithData::getEntry,
-        (entry, time, exception) -> LOG.warn("{}: Failed to get {} in {}: {}",
-            follower.getName(), entry, time, exception));
+    final List<LogEntryProto> protos = buffer.pollList(getHeartbeatWaitTimeMs(), EntryWithData::getEntry,
+        (entry, time, exception) -> LOG.warn("Failed to get {} in {}: {}", entry, time, exception));
     buffer.clear();
     assertProtos(protos, followerNext, previous, snapshotIndex);
     return leaderState.newAppendEntriesRequestProto(follower, protos, previous, callId);

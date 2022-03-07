@@ -43,6 +43,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.codahale.metrics.Timer;
@@ -153,30 +154,22 @@ public class GrpcLogAppender extends LogAppenderBase {
     Optional.ofNullable(appendLogRequestObserver).ifPresent(StreamObserver::onCompleted);
   }
 
-  private long getWaitTimeMs() {
+  public long getWaitTimeMs() {
     if (haveTooManyPendingRequests()) {
-      return getHeartbeatRemainingTimeMs(); // Should wait for a short time
+      return getHeartbeatWaitTimeMs(); // Should wait for a short time
     } else if (shouldSendAppendEntries()) {
       return 0L;
     }
-    return Math.min(10L, getHeartbeatRemainingTimeMs());
+    return Math.min(10L, getHeartbeatWaitTimeMs());
   }
 
   private void mayWait() {
     // use lastSend time instead of lastResponse time
-    final long waitTimeMs = getWaitTimeMs();
-    if (waitTimeMs <= 0L) {
-      return;
-    }
-
-    synchronized(this) {
-      try {
-        LOG.trace("{}: wait {}ms", this, waitTimeMs);
-        wait(waitTimeMs);
-      } catch (InterruptedException ie) {
-        LOG.warn(this + ": Wait interrupted by " + ie);
-        Thread.currentThread().interrupt();
-      }
+    try {
+      getEventAwaitForSignal().await(getWaitTimeMs(), TimeUnit.MILLISECONDS);
+    } catch (InterruptedException ie) {
+      LOG.warn(this + ": Wait interrupted by " + ie);
+      Thread.currentThread().interrupt();
     }
   }
 
@@ -237,7 +230,7 @@ public class GrpcLogAppender extends LogAppenderBase {
     scheduler.onTimeout(requestTimeoutDuration,
         () -> timeoutAppendRequest(request.getCallId(), request.isHeartbeat()),
         LOG, () -> "Timeout check failed for append entry request: " + request);
-    getFollower().updateLastRpcSendTime();
+    getFollower().updateLastRpcSendTime(request.isHeartbeat());
   }
 
   private void timeoutAppendRequest(long cid, boolean heartbeat) {
@@ -510,7 +503,7 @@ public class GrpcLogAppender extends LogAppenderBase {
       for (InstallSnapshotRequestProto request : newInstallSnapshotRequests(requestId, snapshot)) {
         if (isRunning()) {
           snapshotRequestObserver.onNext(request);
-          getFollower().updateLastRpcSendTime();
+          getFollower().updateLastRpcSendTime(false);
           responseHandler.addPending(request);
         } else {
           break;
@@ -526,13 +519,11 @@ public class GrpcLogAppender extends LogAppenderBase {
       return;
     }
 
-    synchronized (this) {
-      while (isRunning() && !responseHandler.isDone()) {
-        try {
-          wait();
-        } catch (InterruptedException ignored) {
-          Thread.currentThread().interrupt();
-        }
+    while (isRunning() && !responseHandler.isDone()) {
+      try {
+        getEventAwaitForSignal().await();
+      } catch (InterruptedException ignored) {
+        Thread.currentThread().interrupt();
       }
     }
 
@@ -560,7 +551,7 @@ public class GrpcLogAppender extends LogAppenderBase {
     try {
       snapshotRequestObserver = getClient().installSnapshot(responseHandler);
       snapshotRequestObserver.onNext(request);
-      getFollower().updateLastRpcSendTime();
+      getFollower().updateLastRpcSendTime(false);
       responseHandler.addPending(request);
       snapshotRequestObserver.onCompleted();
     } catch (Exception e) {
@@ -571,13 +562,11 @@ public class GrpcLogAppender extends LogAppenderBase {
       return;
     }
 
-    synchronized (this) {
-      while (isRunning() && !responseHandler.isDone()) {
-        try {
-          wait();
-        } catch (InterruptedException ignored) {
-          Thread.currentThread().interrupt();
-        }
+    while (isRunning() && !responseHandler.isDone()) {
+      try {
+        getEventAwaitForSignal().await();
+      } catch (InterruptedException ignored) {
+        Thread.currentThread().interrupt();
       }
     }
   }
@@ -591,15 +580,15 @@ public class GrpcLogAppender extends LogAppenderBase {
     final FollowerInfo follower = getFollower();
     final long leaderNextIndex = getRaftLog().getNextIndex();
     final boolean isFollowerBootstrapping = getLeaderState().isFollowerBootstrapping(follower);
-
+    final long leaderStartIndex = getRaftLog().getStartIndex();
+    final TermIndex firstAvailable = Optional.ofNullable(getRaftLog().getTermIndex(leaderStartIndex))
+        .orElseGet(() -> TermIndex.valueOf(getServer().getInfo().getCurrentTerm(), leaderNextIndex));
     if (isFollowerBootstrapping && !follower.hasAttemptedToInstallSnapshot()) {
       // If the follower is bootstrapping and has not yet installed any snapshot from leader, then the follower should
       // be notified to install a snapshot. Every follower should try to install at least one snapshot during
       // bootstrapping, if available.
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("{}: Notify follower to install snapshot as it is bootstrapping.", this);
-      }
-      return getRaftLog().getLastEntryTermIndex();
+      LOG.debug("{}: follower is bootstrapping, notify to install snapshot to {}.", this, firstAvailable);
+      return firstAvailable;
     }
 
     final long followerNextIndex = follower.getNextIndex();
@@ -607,18 +596,15 @@ public class GrpcLogAppender extends LogAppenderBase {
       return null;
     }
 
-    final long leaderStartIndex = getRaftLog().getStartIndex();
-
     if (followerNextIndex < leaderStartIndex) {
       // The Leader does not have the logs from the Follower's last log
       // index onwards. And install snapshot is disabled. So the Follower
       // should be notified to install the latest snapshot through its
       // State Machine.
-      return getRaftLog().getTermIndex(leaderStartIndex);
+      return firstAvailable;
     } else if (leaderStartIndex == RaftLog.INVALID_LOG_INDEX) {
       // Leader has no logs to check from, hence return next index.
-      return TermIndex.valueOf(getServer().getInfo().getCurrentTerm(),
-          leaderNextIndex);
+      return firstAvailable;
     }
 
     return null;

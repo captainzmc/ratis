@@ -34,6 +34,8 @@ import org.apache.ratis.proto.RaftProtos.RaftClientReplyProto;
 import org.apache.ratis.proto.RaftProtos.RaftClientRequestProto;
 import org.apache.ratis.proto.RaftProtos.SetConfigurationRequestProto;
 import org.apache.ratis.proto.RaftProtos.TransferLeadershipRequestProto;
+import org.apache.ratis.proto.RaftProtos.SnapshotManagementRequestProto;
+import org.apache.ratis.proto.RaftProtos.LeaderElectionManagementRequestProto;
 import org.apache.ratis.util.IOUtils;
 import org.apache.ratis.util.JavaUtils;
 import org.apache.ratis.util.PeerProxyMap;
@@ -110,6 +112,14 @@ public class GrpcClientRpc extends RaftClientRpcWithProxy<GrpcClientProtocolClie
       final TransferLeadershipRequestProto proto = ClientProtoUtils.toTransferLeadershipRequestProto(
           (TransferLeadershipRequest) request);
       return ClientProtoUtils.toRaftClientReply(proxy.transferLeadership(proto));
+    } else if (request instanceof SnapshotManagementRequest) {
+      final SnapshotManagementRequestProto proto = ClientProtoUtils.toSnapshotManagementRequestProto
+          ((SnapshotManagementRequest) request);
+      return ClientProtoUtils.toRaftClientReply(proxy.snapshotManagement(proto));
+    } else if (request instanceof LeaderElectionManagementRequest) {
+      final LeaderElectionManagementRequestProto proto = ClientProtoUtils.toLeaderElectionManagementRequestProto
+          ((LeaderElectionManagementRequest) request);
+      return ClientProtoUtils.toRaftClientReply(proxy.leaderElectionManagement(proto));
     } else {
       final CompletableFuture<RaftClientReply> f = sendRequest(request, proxy);
       // TODO: timeout support
@@ -135,7 +145,7 @@ public class GrpcClientRpc extends RaftClientRpcWithProxy<GrpcClientProtocolClie
     final CompletableFuture<RaftClientReplyProto> replyFuture = new CompletableFuture<>();
     // create a new grpc stream for each non-async call.
     final StreamObserver<RaftClientRequestProto> requestObserver =
-        proxy.orderedWithTimeout(new StreamObserver<RaftClientReplyProto>() {
+        proxy.unorderedWithTimeout(new StreamObserver<RaftClientReplyProto>() {
           @Override
           public void onNext(RaftClientReplyProto value) {
             replyFuture.complete(value);

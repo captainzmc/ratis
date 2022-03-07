@@ -17,7 +17,6 @@
  */
 package org.apache.ratis.server.leader;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.ratis.proto.RaftProtos.AppendEntriesRequestProto;
 import org.apache.ratis.proto.RaftProtos.InstallSnapshotRequestProto;
 import org.apache.ratis.protocol.RaftPeerId;
@@ -27,6 +26,7 @@ import org.apache.ratis.server.protocol.TermIndex;
 import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.server.raftlog.RaftLogIOException;
 import org.apache.ratis.statemachine.SnapshotInfo;
+import org.apache.ratis.util.AwaitForSignal;
 import org.apache.ratis.util.ReflectionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -137,38 +137,36 @@ public interface LogAppender {
   void run() throws InterruptedException, IOException;
 
   /**
-   * Similar to {@link #notify()}, wake up this {@link LogAppender} for an event, which can be:
+   * Get the {@link AwaitForSignal} for events, which can be:
    * (1) new log entries available,
    * (2) log indices changed, or
    * (3) a snapshot installation completed.
    */
-  @SuppressFBWarnings("NN_NAKED_NOTIFY")
+  AwaitForSignal getEventAwaitForSignal();
+
+  /** The same as getEventAwaitForSignal().signal(). */
   default void notifyLogAppender() {
-    synchronized (this) {
-      notify();
-    }
+    getEventAwaitForSignal().signal();
   }
 
   /** Should the leader send appendEntries RPC to the follower? */
   default boolean shouldSendAppendEntries() {
-    return hasAppendEntries() || shouldHeartbeat();
+    return hasAppendEntries() || getHeartbeatWaitTimeMs() <= 0;
   }
 
-  /** Does it has outstanding appendEntries? */
+  /** Does it have outstanding appendEntries? */
   default boolean hasAppendEntries() {
     return getFollower().getNextIndex() < getRaftLog().getNextIndex();
   }
 
-  /** The same as getHeartbeatRemainingTime() <= 0. */
-  default boolean shouldHeartbeat() {
-    return getHeartbeatRemainingTimeMs() <= 0;
-  }
-
-  /**
-   * @return the time in milliseconds that the leader should send a heartbeat.
-   */
-  default long getHeartbeatRemainingTimeMs() {
-    return getServer().properties().minRpcTimeoutMs()/2 - getFollower().getLastRpcTime().elapsedTimeMs();
+  /** @return the wait time in milliseconds to send the next heartbeat. */
+  default long getHeartbeatWaitTimeMs() {
+    final int min = getServer().properties().minRpcTimeoutMs();
+    // time remaining to send a heartbeat
+    final long heartbeatRemainingTimeMs = min/2 - getFollower().getLastRpcResponseTime().elapsedTimeMs();
+    // avoid sending heartbeat too frequently
+    final long noHeartbeatTimeMs = min/4 - getFollower().getLastHeartbeatSendTime().elapsedTimeMs();
+    return Math.max(heartbeatRemainingTimeMs, noHeartbeatTimeMs);
   }
 
   /** Handle the event that the follower has replied a term. */

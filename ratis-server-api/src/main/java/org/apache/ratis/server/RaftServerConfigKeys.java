@@ -96,6 +96,66 @@ public interface RaftServerConfigKeys {
     setInt(properties::setInt, STAGING_CATCHUP_GAP_KEY, stagingCatchupGap);
   }
 
+  interface ThreadPool {
+    String PREFIX = RaftServerConfigKeys.PREFIX + ".threadpool";
+
+    String PROXY_CACHED_KEY = PREFIX + ".proxy.cached";
+    boolean PROXY_CACHED_DEFAULT = true;
+    static boolean proxyCached(RaftProperties properties) {
+      return getBoolean(properties::getBoolean, PROXY_CACHED_KEY, PROXY_CACHED_DEFAULT, getDefaultLog());
+    }
+    static void setProxyCached(RaftProperties properties, boolean useCached) {
+      setBoolean(properties::setBoolean, PROXY_CACHED_KEY, useCached);
+    }
+
+    String PROXY_SIZE_KEY = PREFIX + ".proxy.size";
+    int PROXY_SIZE_DEFAULT = 0;
+    static int proxySize(RaftProperties properties) {
+      return getInt(properties::getInt, PROXY_SIZE_KEY, PROXY_SIZE_DEFAULT, getDefaultLog(),
+          requireMin(0), requireMax(65536));
+    }
+    static void setProxySize(RaftProperties properties, int port) {
+      setInt(properties::setInt, PROXY_SIZE_KEY, port);
+    }
+
+    String SERVER_CACHED_KEY = PREFIX + ".server.cached";
+    boolean SERVER_CACHED_DEFAULT = true;
+    static boolean serverCached(RaftProperties properties) {
+      return getBoolean(properties::getBoolean, SERVER_CACHED_KEY, SERVER_CACHED_DEFAULT, getDefaultLog());
+    }
+    static void setServerCached(RaftProperties properties, boolean useCached) {
+      setBoolean(properties::setBoolean, SERVER_CACHED_KEY, useCached);
+    }
+
+    String SERVER_SIZE_KEY = PREFIX + ".server.size";
+    int SERVER_SIZE_DEFAULT = 0;
+    static int serverSize(RaftProperties properties) {
+      return getInt(properties::getInt, SERVER_SIZE_KEY, SERVER_SIZE_DEFAULT, getDefaultLog(),
+          requireMin(0), requireMax(65536));
+    }
+    static void setServerSize(RaftProperties properties, int port) {
+      setInt(properties::setInt, SERVER_SIZE_KEY, port);
+    }
+
+    String CLIENT_CACHED_KEY = PREFIX + ".client.cached";
+    boolean CLIENT_CACHED_DEFAULT = true;
+    static boolean clientCached(RaftProperties properties) {
+      return getBoolean(properties::getBoolean, CLIENT_CACHED_KEY, CLIENT_CACHED_DEFAULT, getDefaultLog());
+    }
+    static void setClientCached(RaftProperties properties, boolean useCached) {
+      setBoolean(properties::setBoolean, CLIENT_CACHED_KEY, useCached);
+    }
+
+    String CLIENT_SIZE_KEY = PREFIX + ".client.size";
+    int CLIENT_SIZE_DEFAULT = 0;
+    static int clientSize(RaftProperties properties) {
+      return getInt(properties::getInt, CLIENT_SIZE_KEY, CLIENT_SIZE_DEFAULT, getDefaultLog(),
+          requireMin(0), requireMax(65536));
+    }
+    static void setClientSize(RaftProperties properties, int port) {
+      setInt(properties::setInt, CLIENT_SIZE_KEY, port);
+    }
+  }
 
   interface Write {
     String PREFIX = RaftServerConfigKeys.PREFIX + ".write";
@@ -288,6 +348,17 @@ public interface RaftServerConfigKeys {
       setInt(properties::setInt, FORCE_SYNC_NUM_KEY, forceSyncNum);
     }
 
+
+    String FLUSH_INTERVAL_MIN_KEY = PREFIX + ".flush.interval.min";
+    TimeDuration FLUSH_INTERVAL_MIN_DEFAULT = TimeDuration.ZERO;
+    static TimeDuration flushIntervalMin(RaftProperties properties) {
+      return getTimeDuration(properties.getTimeDuration(FLUSH_INTERVAL_MIN_DEFAULT.getUnit()),
+              FLUSH_INTERVAL_MIN_KEY, FLUSH_INTERVAL_MIN_DEFAULT, getDefaultLog());
+    }
+    static void setFlushIntervalMin(RaftProperties properties, TimeDuration flushTimeInterval) {
+      setTimeDuration(properties::setTimeDuration, FLUSH_INTERVAL_MIN_KEY, flushTimeInterval);
+    }
+
     /** The policy to handle corrupted raft log. */
     enum CorruptionPolicy {
       /** Rethrow the exception. */
@@ -360,6 +431,16 @@ public interface RaftServerConfigKeys {
       static void setSyncTimeoutRetry(RaftProperties properties, int syncTimeoutRetry) {
         setInt(properties::setInt, SYNC_TIMEOUT_RETRY_KEY, syncTimeoutRetry, requireMin(-1));
       }
+
+      String READ_TIMEOUT_KEY = PREFIX + ".read.timeout";
+      TimeDuration READ_TIMEOUT_DEFAULT = TimeDuration.valueOf(1000, TimeUnit.MILLISECONDS);
+      static TimeDuration readTimeout(RaftProperties properties) {
+        return getTimeDuration(properties.getTimeDuration(READ_TIMEOUT_DEFAULT.getUnit()),
+            READ_TIMEOUT_KEY, READ_TIMEOUT_DEFAULT, getDefaultLog());
+      }
+      static void setReadTimeout(RaftProperties properties, TimeDuration readTimeout) {
+        setTimeDuration(properties::setTimeDuration, READ_TIMEOUT_KEY, readTimeout);
+      }
     }
 
     interface Appender {
@@ -423,6 +504,18 @@ public interface RaftServerConfigKeys {
       setBoolean(properties::setBoolean, AUTO_TRIGGER_ENABLED_KEY, autoTriggerThreshold);
     }
 
+    /** The log index gap between to two snapshot creations. */
+    String CREATION_GAP_KEY = PREFIX + ".creation.gap";
+    long CREATION_GAP_DEFAULT = 1024;
+    static long creationGap(RaftProperties properties) {
+      return getLong(
+          properties::getLong, CREATION_GAP_KEY, CREATION_GAP_DEFAULT,
+          getDefaultLog(), requireMin(1L));
+    }
+    static void setCreationGap(RaftProperties properties, long creationGap) {
+      setLong(properties::setLong, CREATION_GAP_KEY, creationGap);
+    }
+
     /** log size limit (in number of log entries) that triggers the snapshot */
     String AUTO_TRIGGER_THRESHOLD_KEY = PREFIX + ".auto.trigger.threshold";
     long AUTO_TRIGGER_THRESHOLD_DEFAULT = 400000L;
@@ -446,6 +539,18 @@ public interface RaftServerConfigKeys {
 
   interface DataStream {
     String PREFIX = RaftServerConfigKeys.PREFIX + ".data-stream";
+
+    String ASYNC_REQUEST_THREAD_POOL_CACHED_KEY = PREFIX + ".async.request.thread.pool.cached";
+    boolean ASYNC_REQUEST_THREAD_POOL_CACHED_DEFAULT = false;
+
+    static boolean asyncRequestThreadPoolCached(RaftProperties properties) {
+      return getBoolean(properties::getBoolean, ASYNC_REQUEST_THREAD_POOL_CACHED_KEY,
+          ASYNC_REQUEST_THREAD_POOL_CACHED_DEFAULT, getDefaultLog());
+    }
+
+    static void setAsyncRequestThreadPoolCached(RaftProperties properties, boolean useCached) {
+      setBoolean(properties::setBoolean, ASYNC_REQUEST_THREAD_POOL_CACHED_KEY, useCached);
+    }
 
     String ASYNC_REQUEST_THREAD_POOL_SIZE_KEY = PREFIX + ".async.request.thread.pool.size";
     int ASYNC_REQUEST_THREAD_POOL_SIZE_DEFAULT = 32;

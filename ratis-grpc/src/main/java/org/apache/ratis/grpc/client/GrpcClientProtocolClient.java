@@ -33,6 +33,8 @@ import org.apache.ratis.proto.RaftProtos.RaftClientReplyProto;
 import org.apache.ratis.proto.RaftProtos.RaftClientRequestProto;
 import org.apache.ratis.proto.RaftProtos.SetConfigurationRequestProto;
 import org.apache.ratis.proto.RaftProtos.TransferLeadershipRequestProto;
+import org.apache.ratis.proto.RaftProtos.SnapshotManagementRequestProto;
+import org.apache.ratis.proto.RaftProtos.LeaderElectionManagementRequestProto;
 import org.apache.ratis.protocol.exceptions.LeaderNotReadyException;
 import org.apache.ratis.protocol.exceptions.TimeoutIOException;
 import org.apache.ratis.thirdparty.io.grpc.netty.GrpcSslContexts;
@@ -209,6 +211,20 @@ public class GrpcClientProtocolClient implements Closeable {
         .transferLeadership(request));
   }
 
+  RaftClientReplyProto snapshotManagement(
+      SnapshotManagementRequestProto request) throws IOException {
+    return blockingCall(() -> adminBlockingStub
+        .withDeadlineAfter(requestTimeoutDuration.getDuration(), requestTimeoutDuration.getUnit())
+        .snapshotManagement(request));
+  }
+
+  RaftClientReplyProto leaderElectionManagement(
+      LeaderElectionManagementRequestProto request) throws IOException {
+    return blockingCall(() -> adminBlockingStub
+        .withDeadlineAfter(requestTimeoutDuration.getDuration(), requestTimeoutDuration.getUnit())
+        .leaderElectionManagement(request));
+  }
+
   private static RaftClientReplyProto blockingCall(
       CheckedSupplier<RaftClientReplyProto, StatusRuntimeException> supplier
       ) throws IOException {
@@ -223,7 +239,7 @@ public class GrpcClientProtocolClient implements Closeable {
     return asyncStub.ordered(responseHandler);
   }
 
-  StreamObserver<RaftClientRequestProto> orderedWithTimeout(StreamObserver<RaftClientReplyProto> responseHandler) {
+  StreamObserver<RaftClientRequestProto> unorderedWithTimeout(StreamObserver<RaftClientReplyProto> responseHandler) {
     return asyncStub.withDeadlineAfter(requestTimeoutDuration.getDuration(), requestTimeoutDuration.getUnit())
         .unordered(responseHandler);
   }

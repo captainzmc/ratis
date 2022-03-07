@@ -129,6 +129,7 @@ class FollowerState extends Daemon {
         }
         synchronized (server) {
           if (outstandingOp.get() == 0
+              && isRunning
               && lastRpcTime.elapsedTime().compareTo(electionTimeout) >= 0
               && !lostMajorityHeartbeatsRecently()) {
             LOG.info("{}: change to CANDIDATE, lastRpcElapsedTime:{}, electionTimeout:{}",
@@ -140,7 +141,7 @@ class FollowerState extends Daemon {
           }
         }
       } catch (InterruptedException e) {
-        LOG.info("{} was interrupted: {}", this, e);
+        LOG.info("{} was interrupted", this);
         LOG.trace("TRACE", e);
         Thread.currentThread().interrupt();
         return;

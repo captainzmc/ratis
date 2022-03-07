@@ -31,6 +31,7 @@ import org.apache.ratis.statemachine.SnapshotInfo;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The default implementation of {@link LogAppender}
@@ -61,7 +62,7 @@ class LogAppenderDefault extends LogAppenderBase {
           return null;
         }
 
-        getFollower().updateLastRpcSendTime();
+        getFollower().updateLastRpcSendTime(request.getEntriesCount() == 0);
         final AppendEntriesReplyProto r = getServerRpc().appendEntries(request);
         getFollower().updateLastRpcResponseTime();
 
@@ -88,7 +89,7 @@ class LogAppenderDefault extends LogAppenderBase {
     InstallSnapshotReplyProto reply = null;
     try {
       for (InstallSnapshotRequestProto request : newInstallSnapshotRequests(requestId, snapshot)) {
-        getFollower().updateLastRpcSendTime();
+        getFollower().updateLastRpcSendTime(false);
         reply = getServerRpc().installSnapshot(request);
         getFollower().updateLastRpcResponseTime();
 
@@ -145,12 +146,7 @@ class LogAppenderDefault extends LogAppenderBase {
         }
       }
       if (isRunning() && !hasAppendEntries()) {
-        final long waitTime = getHeartbeatRemainingTimeMs();
-        if (waitTime > 0) {
-          synchronized (this) {
-            wait(waitTime);
-          }
-        }
+        getEventAwaitForSignal().await(getHeartbeatWaitTimeMs(), TimeUnit.MILLISECONDS);
       }
       getLeaderState().checkHealth(getFollower());
     }

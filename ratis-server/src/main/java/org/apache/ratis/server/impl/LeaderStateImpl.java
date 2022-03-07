@@ -31,6 +31,7 @@ import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.apache.ratis.protocol.SetConfigurationRequest;
+import org.apache.ratis.protocol.TransferLeadershipRequest;
 import org.apache.ratis.protocol.exceptions.LeaderNotReadyException;
 import org.apache.ratis.protocol.exceptions.NotLeaderException;
 import org.apache.ratis.protocol.exceptions.NotReplicatedException;
@@ -201,7 +202,7 @@ class LeaderStateImpl implements LeaderState {
     }
 
     void forEach(Consumer<LogAppender> action) {
-      senders.parallelStream().forEach(action);
+      senders.forEach(action);
     }
 
     void addAll(Collection<LogAppender> newSenders) {
@@ -252,6 +253,7 @@ class LeaderStateImpl implements LeaderState {
   private final RaftServerMetricsImpl raftServerMetrics;
   private final LogAppenderMetrics logAppenderMetrics;
   private final long followerMaxGapThreshold;
+  private final PendingStepDown pendingStepDown;
 
   LeaderStateImpl(RaftServerImpl server) {
     this.name = server.getMemberId() + "-" + JavaUtils.getClassSimpleName(getClass());
@@ -271,6 +273,7 @@ class LeaderStateImpl implements LeaderState {
     this.pendingRequests = new PendingRequests(server.getMemberId(), properties, raftServerMetrics);
     this.watchRequests = new WatchRequests(server.getMemberId(), properties);
     this.messageStreamRequests = new MessageStreamRequests(server.getMemberId());
+    this.pendingStepDown = new PendingStepDown(this);
     long maxPendingRequests = RaftServerConfigKeys.Write.elementLimit(properties);
     double followerGapRatioMax = RaftServerConfigKeys.Write.followerGapRatioMax(properties);
 
@@ -536,6 +539,7 @@ class LeaderStateImpl implements LeaderState {
   private void stepDown(long term, StepDownReason reason) {
     try {
       server.changeToFollowerAndPersistMetadata(term, reason);
+      pendingStepDown.complete(server::newSuccessReply);
     } catch(IOException e) {
       final String s = this + ": Failed to persist metadata for term " + term;
       LOG.warn(s, e);
@@ -545,6 +549,10 @@ class LeaderStateImpl implements LeaderState {
         throw new IllegalStateException(s + " and running == true", e);
       }
     }
+  }
+
+  CompletableFuture<RaftClientReply> submitStepDownRequestAsync(TransferLeadershipRequest request) {
+    return pendingStepDown.submitAsync(request);
   }
 
   private synchronized void sendStartLeaderElectionToHigherPriorityPeer(RaftPeerId follower, TermIndex lastEntry) {
@@ -559,6 +567,7 @@ class LeaderStateImpl implements LeaderState {
     final StartLeaderElectionRequestProto r = ServerProtoUtils.toStartLeaderElectionRequestProto(
         server.getMemberId(), follower, lastEntry);
     CompletableFuture.supplyAsync(() -> {
+      server.getLeaderElectionMetrics().onTransferLeadership();
       try {
         StartLeaderElectionReplyProto replyProto = server.getServerRpc().startLeaderElection(r);
         LOG.info("{} received {} reply of StartLeaderElectionRequest from follower:{}",
@@ -734,11 +743,17 @@ class LeaderStateImpl implements LeaderState {
   }
 
   private void updateCommit() {
-    getMajorityMin(FollowerInfo::getMatchIndex, raftLog::getFlushIndex)
-        .ifPresent(m -> updateCommit(m.majority, m.min));
+    getMajorityMin(FollowerInfo::getMatchIndex, raftLog::getFlushIndex,
+        followerMaxGapThreshold)
+    .ifPresent(m -> updateCommit(m.majority, m.min));
   }
 
   private Optional<MinMajorityMax> getMajorityMin(ToLongFunction<FollowerInfo> followerIndex, LongSupplier logIndex) {
+    return getMajorityMin(followerIndex, logIndex, -1);
+  }
+
+  private Optional<MinMajorityMax> getMajorityMin(ToLongFunction<FollowerInfo> followerIndex,
+      LongSupplier logIndex, long gapThreshold) {
     final RaftPeerId selfId = server.getId();
     final RaftConfigurationImpl conf = server.getRaftConf();
 
@@ -749,7 +764,7 @@ class LeaderStateImpl implements LeaderState {
     }
 
     final long[] indicesInNewConf = getSorted(followers, includeSelf, followerIndex, logIndex);
-    final MinMajorityMax newConf = MinMajorityMax.valueOf(indicesInNewConf, followerMaxGapThreshold);
+    final MinMajorityMax newConf = MinMajorityMax.valueOf(indicesInNewConf, gapThreshold);
 
     if (!conf.isTransitional()) {
       return Optional.of(newConf);
@@ -905,17 +920,25 @@ class LeaderStateImpl implements LeaderState {
     }
 
     final RaftConfigurationImpl conf = server.getRaftConf();
-    int leaderPriority = conf.getPeer(server.getId()).getPriority();
+    final RaftPeer leader = conf.getPeer(server.getId());
+    if (leader == null) {
+      LOG.error("{} the leader {} is not in the conf {}", this, server.getId(), conf);
+      return;
+    }
+    int leaderPriority = leader.getPriority();
 
     for (LogAppender logAppender : senders.getSenders()) {
-      FollowerInfo followerInfo = logAppender.getFollower();
-      RaftPeerId followerID = followerInfo.getPeer().getId();
-      int followerPriority = conf.getPeer(followerID).getPriority();
-
+      final FollowerInfo followerInfo = logAppender.getFollower();
+      final RaftPeerId followerID = followerInfo.getPeer().getId();
+      final RaftPeer follower = conf.getPeer(followerID);
+      if (follower == null) {
+        LOG.error("{} the follower {} is not in the conf {}", this, server.getId(), conf);
+        continue;
+      }
+      final int followerPriority = follower.getPriority();
       if (followerPriority <= leaderPriority) {
         continue;
       }
-
       final TermIndex leaderLastEntry = server.getState().getLastEntry();
       if (leaderLastEntry == null) {
         LOG.info("{} send StartLeaderElectionRequest to follower:{} on term:{} because follower's priority:{} " +
@@ -931,7 +954,6 @@ class LeaderStateImpl implements LeaderState {
                 "is higher than leader's:{} and follower's lastEntry index:{} catch up with leader's:{}",
             this, followerID, currentTerm, followerPriority, leaderPriority, followerInfo.getMatchIndex(),
             leaderLastEntry.getIndex());
-
         sendStartLeaderElectionToHigherPriorityPeer(followerID, leaderLastEntry);
         return;
       }
