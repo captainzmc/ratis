@@ -48,7 +48,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.ratis.thirdparty.com.codahale.metrics.Timer;
+import com.codahale.metrics.Timer;
 
 /**
  * A new log appender implementation using grpc bi-directional stream API.
