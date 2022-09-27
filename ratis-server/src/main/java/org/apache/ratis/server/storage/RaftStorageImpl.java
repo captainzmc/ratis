@@ -70,10 +70,21 @@ public class RaftStorageImpl implements RaftStorage {
     if (state != StorageState.NORMAL) {
       unlockOnFailure(storageDir);
       throw new IOException("Failed to load " + storageDir + ": " + state);
+    } else {
+      unlockAfterInitialize(storageDir);
+      LOG.info("RaftStorageImpl initialize success, unlock storageDir " + storageDir);
     }
   }
 
   static void unlockOnFailure(RaftStorageDirectoryImpl dir) {
+    try {
+      dir.unlock();
+    } catch (Throwable t) {
+      LOG.warn("Failed to unlock " + dir, t);
+    }
+  }
+
+  static void unlockAfterInitialize(RaftStorageDirectoryImpl dir) {
     try {
       dir.unlock();
     } catch (Throwable t) {
