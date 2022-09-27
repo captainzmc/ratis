@@ -77,6 +77,7 @@ class ServerState implements Closeable {
   private final SnapshotManager snapshotManager;
   private volatile Timestamp lastNoLeaderTime;
   private final TimeDuration noLeaderTimeout;
+  private Boolean isInitialized = false;
 
   /**
    * Latest term server has seen.
@@ -160,6 +161,9 @@ class ServerState implements Closeable {
     this.log = JavaUtils.memoize(() -> initRaftLog(getSnapshotIndexFromStateMachine, prop));
     this.stateMachineUpdater = JavaUtils.memoize(() -> new StateMachineUpdater(
         stateMachine, server, this, getLog().getSnapshotIndex(), prop));
+    if (!getIsInitialized()) {
+      initialize(stateMachine);
+    }
   }
 
   void initialize(StateMachine stateMachine) throws IOException {
@@ -174,8 +178,12 @@ class ServerState implements Closeable {
     final RaftStorageMetadata metadata = log.get().loadMetadata();
     currentTerm.set(metadata.getTerm());
     votedFor = metadata.getVotedFor();
+    isInitialized = true;
   }
 
+  Boolean getIsInitialized() {
+    return isInitialized;
+  }
   RaftGroupMemberId getMemberId() {
     return memberId;
   }

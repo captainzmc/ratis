@@ -327,7 +327,9 @@ class RaftServerImpl implements RaftServer.Division,
     if (!lifeCycle.compareAndTransition(NEW, STARTING)) {
       return false;
     }
-    state.initialize(stateMachine);
+    if (!state.getIsInitialized()) {
+      state.initialize(stateMachine);
+    }
 
     final RaftConfigurationImpl conf = getRaftConf();
     if (conf != null && conf.containsInBothConfs(getId())) {
