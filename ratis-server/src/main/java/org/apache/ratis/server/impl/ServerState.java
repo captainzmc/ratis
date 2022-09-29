@@ -162,7 +162,11 @@ class ServerState implements Closeable {
     this.stateMachineUpdater = JavaUtils.memoize(() -> new StateMachineUpdater(
         stateMachine, server, this, getLog().getSnapshotIndex(), prop));
     if (!getIsInitialized()) {
-      initialize(stateMachine);
+      try {
+        initialize(stateMachine);
+      } catch (IOException e) {
+        throw e;
+      }
     }
   }
 
