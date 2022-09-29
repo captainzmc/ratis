@@ -131,6 +131,9 @@ class ServerState implements Closeable {
             .setStorageFreeSpaceMin(RaftServerConfigKeys.storageFreeSpaceMin(prop))
             .build();
         storageFound = true;
+        if (!getIsInitialized()) {
+          initialize(stateMachine);
+        }
         break;
       } catch (IOException e) {
         if (e.getCause() instanceof OverlappingFileLockException) {
@@ -161,13 +164,6 @@ class ServerState implements Closeable {
     this.log = JavaUtils.memoize(() -> initRaftLog(getSnapshotIndexFromStateMachine, prop));
     this.stateMachineUpdater = JavaUtils.memoize(() -> new StateMachineUpdater(
         stateMachine, server, this, getLog().getSnapshotIndex(), prop));
-    if (!getIsInitialized()) {
-      try {
-        initialize(stateMachine);
-      } catch (IOException e) {
-        throw e;
-      }
-    }
   }
 
   void initialize(StateMachine stateMachine) throws IOException {
